@@ -22,7 +22,8 @@ metadata:
 | 节点 1：VLESS + REALITY + XTLS-Vision | TCP 443，抗封锁主力，无需自有证书 |
 | 节点 2：Hysteria2 | UDP 443 + 端口跳跃，高丢包链路吞吐最强 |
 | 节点 3：TUIC v5 | UDP 8443，默认关闭 0-RTT 以兼容认证 |
-| 一条订阅 URL | 一次返回全部 3 个节点（base64） |
+| 一条订阅 URL | 一次返回全部 3 个节点（base64，通用客户端） |
+| 一条 Clash 订阅 URL | 同一批节点的 Clash YAML（Clash / mihomo 专用，`subClashPath`） |
 | 交付文档 | 面板凭据、节点参数、防火墙、运维命令、实测数据 |
 
 ## 何时使用
@@ -154,6 +155,17 @@ python scripts/merge_subscription.py
 这样一条订阅 URL 就能返回全部节点。合并脚本保留原客户端；仅在从外部验证新订阅可用后，按用户要求清理旧身份。
 合并失败会以非零状态退出；重复运行若遇到已有 email/subId，应先回读核对，不能盲目删除后重建。
 
+⚠️ **订阅有两条，格式不同，交付时必须都给**：
+
+| 地址 | 返回 | 给谁 |
+|---|---|---|
+| `/<subPath>/<subId>` | base64 节点列表 | v2rayN / v2rayNG / NekoBox / Karing / Hiddify / Shadowrocket |
+| `/<subClashPath>/<subId>` | Clash YAML | Clash Verge Rev / Clash Meta for Android / FlClash |
+
+`subClashEnable` 在 3x-ui 里**默认关闭**，`deploy_nodes.py` 已自动打开；
+手工处理旧面板时要单独开启并 **重启面板**，否则 Clash 路径是 404。
+把 base64 那条给 Clash 会报 `yaml: unmarshal errors: cannot unmarshal !!str`。详见 `pitfalls.md` §6.7。
+
 ### Step 6 · 放行端口
 
 `deploy_nodes.py` 会按实际端口生成 iptables 命令，执行后务必 `netfilter-persistent save`。
@@ -179,7 +191,7 @@ python scripts/render_report.py -o .
 
 - 面板地址 / 用户名 / 密码 / 随机路径 / API Token / 证书有效期
 - 每个节点的分享链接 + 参数明细表
-- 订阅 URL
+- 订阅 URL（**两条**：通用 base64 + Clash YAML，标明各自给哪些客户端）
 - **客户端兼容性矩阵**（见 `references/protocols-and-clients.md`，这一步不能省）
 - 防火墙放行端口表
 - 实测数据

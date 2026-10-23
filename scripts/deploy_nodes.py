@@ -316,10 +316,15 @@ for ib in (d.get("obj") or []):
     print("#%s  %s  %s/%s  clients=%d" % (ib.get("id"), ib.get("remark"),
           ib.get("protocol"), ib.get("port"), len(s.get("clients") or [])))'
 
-echo "=== 4. 设置分享地址 ==="
+echo "=== 4. 设置分享地址 + 启用 Clash 订阅 ==="
 curl -fskS -H "$H1" -H "$AUTH" -X POST "$BASE/setting/all" > /root/.xui-skill/settings.json
 # ⚠️ /setting/all 是 POST；/setting/update 是整体覆盖，必须拿全量改完再回写。
 # ⚠️ heredoc 用引号定界符时 bash 不展开 ${VAR}，域名靠 sys.argv 传入。
+# ⚠️ subClashEnable 默认 false —— 此时 /sub/<subId> 只返回 base64 节点列表，
+#    Clash / mihomo 系客户端（Clash Verge Rev、Clash Meta for Android）拿到后
+#    会报 `yaml: unmarshal errors: cannot unmarshal !!str`，因为它们只认 YAML。
+#    这里一并打开，它走独立的 subClashPath，不影响通用订阅。
+#    注意：开关要 **重启面板** 才生效（实测重启前访问 subClashPath 是 404）。
 python3 - "$DOMAIN" <<'PYEOF'
 import json, sys
 domain = sys.argv[1]
@@ -330,8 +335,10 @@ if d.get("success") is not True or not isinstance(d.get("obj"), dict) or not d["
 obj = d["obj"]
 obj["shareAddrStrategy"] = "custom"
 obj["shareAddr"] = domain
+obj["subClashEnable"] = True
 json.dump(obj, open("/root/.xui-skill/settings.new.json", "w"))
-print("shareAddr ->", domain, "| 键数:", len(obj))
+print("shareAddr ->", domain, "| subClashEnable -> True | 键数:", len(obj))
+print("subClashPath ->", obj.get("subClashPath"))
 PYEOF
 curl -fskS -X POST -H "$H1" -H "$AUTH" -H 'Content-Type: application/json' \
   --data-binary @/root/.xui-skill/settings.new.json "$BASE/setting/update" | api_check
@@ -389,6 +396,15 @@ for it in (d.get("obj") or []):
         print(it.get("remark"), "|", it.get("uri"))'
 
 echo "=== DEPLOY DONE ==="
+echo ""
+echo "=== 订阅路径（两条，格式不同，别混用）==="
+python3 - <<'PYEOF'
+import json
+o = json.load(open("/root/.xui-skill/settings.new.json"))
+print("  通用（base64 节点列表）: /%s/<subId>" % (o.get("subPath") or "").strip("/"))
+print("  Clash / mihomo（YAML） : /%s/<subId>" % (o.get("subClashPath") or "").strip("/"))
+print("  端口: %s" % o.get("subPort"))
+PYEOF
 """
 
 

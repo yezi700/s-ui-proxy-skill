@@ -55,14 +55,17 @@ else
   echo "(未配置 SUB_PATH / MERGED_SUBID)"
 fi
 echo "@@@PANELDOM"
-# webDomain 决定面板是否强制 Host 头校验；为空时用 IP 也能访问。
+# webDomain 决定面板是否强制 Host 头校验；subClash* 决定 Clash 订阅是否可用。
 curl -sk -X POST -H "Host: ${DOMAIN}" -H "Authorization: Bearer ${API_TOKEN}" \
   "https://127.0.0.1:${PANEL_PORT}/${PANEL_PATH}/panel/api/setting/all" 2>/dev/null \
   | python3 -c 'import json,sys
 try:
-    print((json.load(sys.stdin).get("obj") or {}).get("webDomain") or "")
+    o = json.load(sys.stdin).get("obj") or {}
 except Exception:
-    print("")'
+    o = {}
+print("webDomain=" + (o.get("webDomain") or ""))
+print("subClashEnable=" + ("1" if o.get("subClashEnable") else "0"))
+print("subClashPath=" + (o.get("subClashPath") or "").strip("/"))'
 echo "@@@BENCH"
 # 实测数据由 bench 脚本写入，格式 [{"node":..,"avg":..,"success":..}, ...]
 { cat "$W/bench.json" 2>/dev/null || echo "[]"; echo; }
@@ -167,12 +170,24 @@ def render_md(ctx: dict) -> str:
     # 2. 订阅
     A("## 2. 订阅地址（推荐）")
     A("")
-    A("一条订阅返回全部节点：")
+    A("一条订阅返回全部节点。**按客户端类型选对应的那一条**，两条内容相同、格式不同：")
+    A("")
+    A("**① 通用格式（base64 节点列表）** —— v2rayN / v2rayNG / NekoBox / Karing / Hiddify / Shadowrocket")
     A("")
     A("```")
     A(d["sub_url"])
     A("```")
     A("")
+    if d.get("clash_url"):
+        A("**② Clash / mihomo 格式（YAML）** —— Clash Verge Rev / Clash Meta for Android / FlClash")
+        A("")
+        A("```")
+        A(d["clash_url"])
+        A("```")
+        A("")
+        A("> ⚠️ Clash 系**不能**用 ①：mihomo 只认 YAML，直接导入 ① 会报")
+        A("> `yaml: unmarshal errors: cannot unmarshal !!str`。反过来通用客户端也不吃 ②。")
+        A("")
     A(f"合并客户端 email：`{d['merged_email']}`　subId：`{d['merged_subid']}`")
     A("")
 
@@ -393,8 +408,10 @@ pre{{background:var(--code-bg);padding:12px 14px;border-radius:8px;
 
 <h2 id="sub">2. 订阅地址（推荐）</h2>
 <div class="card">
-<p>一条订阅返回全部节点，导入客户端后自动更新：</p>
+<p>一条订阅返回全部节点，导入客户端后自动更新。<b>按客户端类型选对应的那一条</b>，两条内容相同、格式不同：</p>
+<p><b>① 通用格式（base64 节点列表）</b> —— v2rayN / v2rayNG / NekoBox / Karing / Hiddify / Shadowrocket</p>
 <pre class="link"><code>{sub_url}</code><button class="copy">复制</button></pre>
+{sub_clash_block}
 <p class="meta">合并客户端 email：<code>{merged_email}</code>　subId：<code>{merged_subid}</code></p>
 </div>
 
@@ -503,6 +520,22 @@ def render_html(ctx: dict) -> str:
             '可在「面板设置 → 常规」填写域名后重启面板。</div>'
         )
 
+    if ctx.get("clash_url"):
+        sub_clash_block = (
+            '<p><b>② Clash / mihomo 格式（YAML）</b> —— Clash Verge Rev / '
+            'Clash Meta for Android / FlClash</p>'
+            f'<pre class="link"><code>{e(ctx["clash_url"])}</code>'
+            '<button class="copy">复制</button></pre>'
+            '<div class="warn">Clash 系<b>不能</b>用 ①：mihomo 只认 YAML，直接导入 ① 会报 '
+            '<code>yaml: unmarshal errors: cannot unmarshal !!str</code>。'
+            '反过来通用客户端也不吃 ②。</div>'
+        )
+    else:
+        sub_clash_block = (
+            '<div class="warn">面板未启用 Clash 订阅（<code>subClashEnable=false</code>），'
+            'Clash 系客户端无法直接导入。可在「面板设置 → 订阅 → Clash」里启用。</div>'
+        )
+
     nodes_html = []
     for i, node in enumerate(ctx["nodes"], 1):
         rows = "".join(
@@ -551,6 +584,7 @@ def render_html(ctx: dict) -> str:
         nodes_html="".join(nodes_html), fw_rows=fw_rows,
         nat_rule=e(ctx["nat_rule"] or "(无)"), ops_text=e(ops_text),
         panel_dom_note=panel_dom_note,
+        sub_clash_block=sub_clash_block,
     )
 
 
@@ -680,6 +714,9 @@ def main() -> int:
     if not isinstance(bench, list):
         bench = []
 
+    # 面板侧设置（webDomain / subClash*），COLLECT 里以 KEY=VALUE 形式输出
+    panel_kv = kv_block(sec.get("PANELDOM", ""))
+
     # 版本
     ver_txt = sec.get("VER", "")
     ver = ""
@@ -726,9 +763,17 @@ def main() -> int:
         "nodes": nodes,
         "fw_ports": fw_ports,
         "nat_rule": nat_rule,
-        "panel_dom": sec.get("PANELDOM", "").strip(),
+        "panel_dom": panel_kv.get("webDomain", ""),
         "bench": bench,
     }
+
+    # Clash / mihomo 订阅：3x-ui 用独立的 subClashPath，且必须 subClashEnable=true。
+    # 只有启用时才给出第二条 URL，否则会把 404 当订阅发给用户。
+    if panel_kv.get("subClashEnable") == "1" and panel_kv.get("subClashPath"):
+        ctx["clash_url"] = (f"https://{domain}:{cfg.get('SUB_PORT', '2096')}"
+                            f"/{panel_kv['subClashPath']}/{cfg.get('MERGED_SUBID', '')}")
+    else:
+        ctx["clash_url"] = ""
 
     outdir = os.path.abspath(args.out)
     os.makedirs(outdir, exist_ok=True)

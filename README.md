@@ -38,6 +38,7 @@ Hysteria2 走 UDP 443 + 端口跳跃，高丢包链路吞吐最强；TUIC 走 UD
 | 分享链接里主机名变成 `localhost` | 设置入站 `shareAddrStrategy=custom` + `shareAddr=域名` |
 | Hysteria2 链接 `sni=` 为空 | 删除 `tlsSettings.settings.serverName` 空字段 |
 | 三个节点只有三条订阅 | 用「一个客户端绑定多入站」合并为一条 |
+| Clash 导入订阅报 `cannot unmarshal !!str` | 3x-ui 的 `/sub` 只出 base64 链接列表；打开 `subClashEnable` 用独立的 `subClashPath` 出 YAML（`deploy_nodes.py` 已自动开启） |
 | 在服务器上自测"通了"，但外面连不上 | VPS 访问自身公网 IP 走 `lo`，绕过 INPUT 链 —— 必须从外部验证 |
 | 某客户端连不上 REALITY | 已知的 Xray ≥26.9.8 破坏性变更，文档给出完整兼容性矩阵 |
 | 代理**出口 IP 是 IPv6**，但需要固定 IPv4 出口 | 根因是 Xray `domainStrategy=AsIs` + 系统有 IPv6；`setup_base.sh` 可一键屏蔽 IPv6（**先换 DNS 再关**，带断网自动回滚） |
@@ -189,6 +190,18 @@ skill 会先按需引导域名准备与 DNS 预检，再按 Step 0→8 执行：
 - **sing-box 系连不上 REALITY**：Xray-core ≥ 26.9.8 起 REALITY 要求客户端
   ClientHello 携带 `X25519MLKEM768`（后量子混合密钥交换）。
 - **Xray 系连不上 Hysteria2 / TUIC**：Xray-core **根本没有实现**这两个协议。
+
+> ⚠️ **订阅地址也分两种格式，别混用**（这是独立于上面的另一类"连不上"）：
+>
+> | 客户端 | 用哪条订阅 | 返回 |
+> |---|---|---|
+> | v2rayN / v2rayNG / NekoBox / Karing / Hiddify / Shadowrocket | `/subPath/<subId>` | base64 节点列表 |
+> | Clash Verge Rev / Clash Meta for Android / FlClash | `/subClashPath/<subId>` | Clash YAML |
+>
+> 把 base64 那条丢给 Clash 会报
+> `yaml: unmarshal errors: cannot unmarshal !!str`。
+> `subClashEnable` 在 3x-ui 里**默认关闭**，`deploy_nodes.py` 会自动打开它；
+> 手工装的旧面板需要在「设置 → 订阅 → Clash」里启用后 **重启面板**。
 
 详见 [`references/protocols-and-clients.md`](references/protocols-and-clients.md)。
 

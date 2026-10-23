@@ -203,6 +203,32 @@ v2rayNG 只有 Xray 内核，无法使用 TUIC / Hysteria2。需要换客户端�
 > 请改用 NekoBox / Hiddify / Clash Meta for Android，或只用 REALITY 节点。
 >
 > **用 Clash Verge / Clash Meta（mihomo）**：三个节点都正常，无需任何调整。
+> 但**订阅地址要用 Clash 那条**（`/subClashPath/<subId>`，返回 YAML），
+> 用通用那条（base64 链接列表）会报 `cannot unmarshal !!str`。见 §3.6。
+
+### 3.6 ⚠️ 第三类"连不上"：订阅格式不匹配（不是协议问题）
+
+这一条和上面两条**根因完全不同**，但它同样会让用户以为"节点全挂了"：
+
+| 订阅地址 | 返回格式 | 适用客户端 |
+|---|---|---|
+| `/subPath/<subId>` | `text/plain`，base64 编码的节点链接列表 | v2rayN / v2rayNG / NekoBox / Karing / Hiddify / Shadowrocket |
+| `/subClashPath/<subId>` | `application/yaml`，Clash 配置 | Clash Verge Rev / Clash Meta for Android / FlClash |
+
+- 3x-ui 的 `subClashEnable` **默认 false**，此时 Clash 路径 404，只有 base64 那条能用。
+- mihomo **只认 YAML**，不会把链接列表转成 proxies →
+  报 `yaml: unmarshal errors: line 1: cannot unmarshal !!str 'dmxlc3M...' into config.RawConfig`。
+- 打开开关后**必须重启面板**才生效（重启前访问 `subClashPath` 仍是 404）。
+
+排查判据是 `Content-Type`，不是 HTTP 200：
+
+```bash
+curl -sk -H "Host: $DOMAIN" "https://127.0.0.1:${SUB_PORT}/${SUB_PATH}/${SUBID}"   -D - -o /dev/null | grep -i content-type
+curl -sk -H "Host: $DOMAIN" "https://127.0.0.1:${SUB_PORT}/${CLASH_PATH}/${SUBID}" -D - -o /dev/null | grep -i content-type
+```
+
+用 mihomo 官方二进制验收（`mihomo -t -f clash.yaml -d .` → `test is successful`），
+别靠肉眼看 YAML。详见 `pitfalls.md` §6.7。
 
 ### 3.5 可选的降级方案
 

@@ -781,6 +781,76 @@ wireguard | hysteria | mtproto | amneziawg | tuic
 > 顺带：**订阅端点本身也需要 `Host` 头**（与面板 API 同一套 `DomainValidatorMiddleware`）。
 > 从本机探测时：不带 → `403` 空响应；带 `Host: <域名>` → `200` + base64 节点列表。
 
+### 6.7 ⚠️ Clash Meta 导入订阅报 `yaml: unmarshal errors: cannot unmarshal !!str`
+
+**现象**：把 `https://<域名>:<订阅端口>/<subPath>/<subId>` 粘进 Clash Verge Rev /
+Clash Meta for Android / FlClash，直接报：
+
+```
+错误
+yaml: unmarshal errors:
+  line 1: cannot unmarshal !!str `dmxlc3M...` into config.RawConfig
+```
+
+`dmxlc3M` 是 `vless` 的 base64 开头 —— 说明客户端把整段 base64 当 YAML 在解析。
+
+**根因**：3x-ui 的 `/sub/<subId>` 只输出 **base64 编码的节点链接列表**（v2ray 订阅格式）。
+mihomo 内核**只认 Clash YAML**，不会把链接列表转换成 proxies —— 这是格式不匹配，
+不是订阅坏了、也不是节点有问题。
+
+**修复**：3x-ui 有独立的 Clash 订阅，默认**关闭**：
+
+| 设置键 | 默认值 | 说明 |
+|---|---|---|
+| `subClashEnable` | `false` | Clash 订阅总开关 |
+| `subClashPath` | 面板自动生成的随机路径 | Clash 订阅的独立路径（≠ `subPath`） |
+| `subClashAutoDetect` | `false` | 按 UA 自动切换（实测开启后普通路径也能出 YAML） |
+
+开启方式（脚本已内置，见 `deploy_nodes.py` 第 4 步）：
+
+```bash
+# ① 读全量设置（是 POST）
+curl -sk -X POST -H "Authorization: Bearer $API_TOKEN" \
+  "https://127.0.0.1:${PANEL_PORT}/${PANEL_PATH}/panel/api/setting/all" > set.json
+
+# ② 只改这一个键，其余原样回写（/setting/update 是整体覆盖）
+python3 -c 'import json;o=json.load(open("set.json"))["obj"];o["subClashEnable"]=True;json.dump(o,open("set.new.json","w"))'
+curl -sk -X POST -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
+  --data-binary @set.new.json \
+  "https://127.0.0.1:${PANEL_PORT}/${PANEL_PATH}/panel/api/setting/update"
+
+# ③ 必须重启面板，否则 subClashPath 仍是 404
+systemctl restart x-ui
+```
+
+之后两条订阅并存，**按客户端选**：
+
+| 客户端 | 用哪条 | 返回 |
+|---|---|---|
+| v2rayN / v2rayNG / NekoBox / Karing / Hiddify / Shadowrocket | `/subPath/<subId>` | `text/plain` base64 链接列表 |
+| Clash Verge Rev / Clash Meta for Android / FlClash | `/subClashPath/<subId>` | `application/yaml` Clash 配置 |
+
+**验证**（注意 `Content-Type` 才是判据，不要只看 200）：
+
+```bash
+curl -sk -H "Host: $DOMAIN" "https://127.0.0.1:${SUB_PORT}/${SUB_PATH}/${SUBID}" \
+  -D - -o /dev/null | grep -i content-type     # → text/plain; charset=utf-8
+curl -sk -H "Host: $DOMAIN" "https://127.0.0.1:${SUB_PORT}/${CLASH_PATH}/${SUBID}" \
+  -D - -o /dev/null | grep -i content-type     # → application/yaml; charset=utf-8
+```
+
+用 mihomo 官方二进制校验配置是否真能解析（比看 YAML 猜靠谱）：
+
+```bash
+mihomo -t -f clash.yaml -d .     # → "configuration file ... test is successful"
+```
+
+> ⚠️ 面板输出的 Clash YAML 是**最小集**（只有 `proxies` / `proxy-groups` / `rules`），
+> 没有 `mixed-port` / `external-controller`。图形客户端会自己补，纯命令行跑 mihomo
+> 需要手动加 `mixed-port: 7890`，否则没有入站监听。
+>
+> ⚠️ 反过来也不成立：把 `/subClashPath` 的 YAML 丢给 v2rayN 同样用不了。
+
 ---
 
 ## 七、其它
