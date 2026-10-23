@@ -1,0 +1,36 @@
+# 凭据与本地文件 —— 绝对不要提交
+deploy.env
+.env
+*.env.local
+node-credentials.json
+install-result.env
+
+# 生成的交付文档（含明文面板密码 / API Token / 节点凭据）
+VPS-*.md
+VPS-*.html
+
+# 运行时产物
+*.log
+*.pid
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 打包产物
+dist/
+*.zip
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 临时目录
+tmp/
+.cache/
+
+# 脚本产出的备份（含真实凭据，绝不能进仓库）
+backup/
+vps/

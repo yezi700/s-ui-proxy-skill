@@ -1,0 +1,35 @@
+# 强制文本文件使用 LF 换行。
+#
+# 为什么需要这个文件：
+#   Windows 上 Git for Windows 默认 core.autocrlf=true，检出时会把 .sh 换成 CRLF。
+#   脚本被 scp/SFTP 传到 Linux VPS 后，bash 会因为行尾的 \r 直接报
+#     /bin/bash^M: bad interpreter: No such file or directory
+#     $'\r': command not found
+#   所以这里对脚本类文件显式锁定 LF。
+#   详见 references/pitfalls.md §1.5。
+
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+
+# Windows 批处理必须是 CRLF
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# 二进制文件不要做换行转换
+*.zip   binary
+*.gz    binary
+*.tar   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
+*.pdf   binary
