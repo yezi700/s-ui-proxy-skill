@@ -351,6 +351,73 @@ PYEOF
   fi
 fi
 
+# ---------------------------------------------------------------- 4.5 订阅端点
+# 协议通了不代表订阅能用。这里同时验两条：通用（base64）与 Clash（YAML）。
+# ⚠️ 判据是 Content-Type 与内容结构，不是 HTTP 200 —— 路径错时 3x-ui 会返回
+#    404 页面而不是空响应，只看状态码很容易漏。
+echo ""
+echo "########## 4.5 订阅端点 ##########"
+SP="${SUB_PATH#/}"; SP="${SP%/}"
+if [ -z "${MERGED_SUBID:-}" ]; then
+  echo "⚠️  未提供 MERGED_SUBID，跳过订阅检查（合并订阅后再跑一次）"
+else
+  # ---- ① 通用 ----
+  GEN="https://127.0.0.1:${SUB_PORT}/${SP}/${MERGED_SUBID}"
+  echo "① 通用: ${GEN}"
+  CT="$(curl -fskS -H "Host: ${DOMAIN}" -D - -o "$WORK/sub_check.txt" "$GEN" 2>/dev/null \
+        | grep -i '^content-type:' | tr -d '\r')"
+  echo "   ${CT:-（无 content-type）}"
+  python3 - <<'PYEOF'
+import base64, pathlib
+raw = pathlib.Path('/root/.xui-skill/sub_check.txt').read_bytes().strip()
+try:
+    txt = base64.b64decode(raw + b'=' * (-len(raw) % 4)).decode('utf-8', 'replace')
+except Exception:
+    txt = raw.decode('utf-8', 'replace')
+links = [l.strip() for l in txt.splitlines() if '://' in l]
+print('   解码后节点数: %d' % len(links))
+for l in links:
+    print('     - %s' % l.split('://')[0])
+if not links:
+    raise SystemExit('   !! 通用订阅里没有节点，检查 subId 是否绑定了入站')
+PYEOF
+
+  # ---- ② Clash / mihomo ----
+  # subClashEnable 默认 false，此时该路径 404；必须先开再重启面板
+  curl -fskS -X POST -H "Host: ${DOMAIN}" -H "Authorization: Bearer ${API_TOKEN}" \
+    "https://127.0.0.1:${PANEL_PORT}/${PANEL_PATH}/panel/api/setting/all" \
+    > "$WORK/settings_check.json" 2>/dev/null || echo '{}' > "$WORK/settings_check.json"
+  cat > "$WORK/clashpath.py" <<'PYEOF'
+import json
+o = (json.load(open('/root/.xui-skill/settings_check.json')).get('obj') or {})
+print((o.get('subClashPath') or '').strip('/') if o.get('subClashEnable') else '')
+PYEOF
+  CP="$(python3 "$WORK/clashpath.py" 2>/dev/null || true)"
+  if [ -n "$CP" ]; then
+    CL="https://127.0.0.1:${SUB_PORT}/${CP}/${MERGED_SUBID}"
+    echo "② Clash: ${CL}"
+    CT2="$(curl -fskS -H "Host: ${DOMAIN}" -D - -o "$WORK/clash_check.yaml" "$CL" 2>/dev/null \
+           | grep -i '^content-type:' | tr -d '\r')"
+    echo "   ${CT2:-（无 content-type）}"
+    python3 - <<'PYEOF'
+import pathlib, re
+txt = pathlib.Path('/root/.xui-skill/clash_check.yaml').read_text(encoding='utf-8', errors='replace')
+ok = True
+for key in ('proxies:', 'proxy-groups:', 'rules:'):
+    have = key in txt
+    ok = ok and have
+    print('   %-15s %s' % (key, '有' if have else '!! 缺失'))
+print('   节点数: %d' % len(re.findall(r'^\s+name:\s', txt, re.M)))
+if not ok:
+    raise SystemExit('   !! Clash 配置结构不完整（可能拿到的是 404 页面）')
+PYEOF
+  else
+    echo "② Clash: 未启用（subClashEnable=false）"
+    echo "   Clash 系客户端需要它：面板「设置 → 订阅 → Clash」开启后重启面板"
+    echo "   （deploy_nodes.py 会自动开启；手工面板需自行处理）"
+  fi
+fi
+
 # ---------------------------------------------------------------- 5. 服务端状态
 echo ""
 echo "########## 5. 服务端监听与规则 ##########"

@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -185,13 +186,39 @@ for it in (d.get("obj") or []):
     else:
         print(it.get("remark"), "|", it.get("uri"))'
 
-echo "=== 8. 订阅内容 ==="
-echo "订阅地址: https://${DOMAIN}:${SUB_PORT}/${SUB_PATH}/${MERGED_SUBID}"
-curl -fskS "https://127.0.0.1:${SUB_PORT}/${SUB_PATH}/${MERGED_SUBID}" \
-  -H "$H1" -o /root/.xui-skill/sub.txt -w "HTTP %{http_code}\n"
-echo "--- 解码后 ---"
+echo "=== 8. 订阅内容（两条，格式不同）==="
+SP="${SUB_PATH#/}"; SP="${SP%/}"
+GENERAL_URL="https://${DOMAIN}:${SUB_PORT}/${SP}/${MERGED_SUBID}"
+echo "① 通用（base64 节点列表）: ${GENERAL_URL}"
+curl -fskS "$GENERAL_URL" -H "$H1" -o /root/.xui-skill/sub.txt -w "   HTTP %{http_code}\n"
+echo "   --- 解码后 ---"
 base64 -d /root/.xui-skill/sub.txt 2>/dev/null \
   | sed 's/#.*//' | cut -c1-80 || cat /root/.xui-skill/sub.txt | head -5
+
+# ② Clash / mihomo：独立的 subClashPath，且必须 subClashEnable=true 才有内容
+# ⚠️ 这里用 heredoc 而不是 `python3 -c '...'`：后者要在一个命令行里嵌套两种引号，
+#    在 Windows 上经 `bash -c` 传入时会被 argv 转义搞坏（unexpected EOF）。
+curl -fskS -X POST -H "$H1" -H "$AUTH" "$BASE/setting/all" > /root/.xui-skill/settings.json
+cat > /root/.xui-skill/clashpath.py <<'PYEOF'
+import json
+o = (json.load(open('/root/.xui-skill/settings.json')).get('obj') or {})
+print((o.get('subClashPath') or '').strip('/') if o.get('subClashEnable') else '')
+PYEOF
+CLASH_PATH="$(python3 /root/.xui-skill/clashpath.py)"
+if [ -n "$CLASH_PATH" ]; then
+  CLASH_URL="https://${DOMAIN}:${SUB_PORT}/${CLASH_PATH}/${MERGED_SUBID}"
+  echo "② Clash / mihomo（YAML）   : ${CLASH_URL}"
+  CT="$(curl -fskS "$CLASH_URL" -H "$H1" -D - -o /root/.xui-skill/clash.yaml \
+        | grep -i '^content-type:' | tr -d '\r')"
+  echo "   ${CT}"
+  head -2 /root/.xui-skill/clash.yaml
+  echo "CLASH_SUB_URL=${CLASH_URL}"
+else
+  echo "② Clash / mihomo（YAML）   : 未启用（subClashEnable=false）"
+  echo "   启用后需重启面板；deploy_nodes.py 会自动打开，手工面板请到"
+  echo "   「设置 → 订阅 → Clash」开启，否则该路径是 404。"
+  echo "CLASH_SUB_URL="
+fi
 
 echo "=== MERGE DONE ==="
 """
@@ -246,13 +273,29 @@ def main() -> int:
     if rc:
         return rc
 
+    # 从远端输出里取回 Clash 订阅地址（未启用时为空）
+    clash_url = ""
+    m = re.search(r"^CLASH_SUB_URL=(.*)$", out, re.M)
+    if m:
+        clash_url = m.group(1).strip()
+
+    sub_path = (cfg.get("SUB_PATH") or "").strip("/")
+    general_url = (f"https://{cfg['DOMAIN']}:{cfg['SUB_PORT']}/"
+                   + (f"{sub_path}/" if sub_path else "")
+                   + cfg["MERGED_SUBID"])
+
     print("\n" + "=" * 64)
     print("合并结果")
     print("=" * 64)
     print(f"客户端 email : {cfg['MERGED_EMAIL']}")
     print(f"subId        : {cfg['MERGED_SUBID']}")
-    print(f"订阅 URL     : https://{cfg['DOMAIN']}:{cfg['SUB_PORT']}"
-          f"/{cfg['SUB_PATH']}/{cfg['MERGED_SUBID']}")
+    print(f"① 通用订阅   : {general_url}")
+    print("               → v2rayN / v2rayNG / NekoBox / Karing / Hiddify / Shadowrocket")
+    if clash_url:
+        print(f"② Clash 订阅 : {clash_url}")
+        print("               → Clash Verge Rev / Clash Meta for Android / FlClash")
+    else:
+        print("② Clash 订阅 : 未启用（subClashEnable=false，需在面板启用后重启）")
     return 0
 
 

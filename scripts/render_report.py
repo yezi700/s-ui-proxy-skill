@@ -121,6 +121,65 @@ def kv_block(text: str) -> dict[str, str]:
     return d
 
 
+# ---------------------------------------------------------------- 链接归一化
+
+def normalize_link(item) -> dict:
+    """把一条分享链接统一成 {uri, remark, protocol, port}。
+
+    ⚠️ 版本差异（这是最容易让报告变成「节点数：0」的地方）：
+      v3.9.x  /inbounds/allLinks 的 obj 是 [{"remark":..,"uri":..,"port":..}, ...]
+      v3.10.x /inbounds/allLinks 的 obj 是 ["vless://...", ...]（纯字符串）
+    订阅内容则永远是纯字符串行。三种输入都要能吃。
+    """
+    if isinstance(item, dict):
+        out = dict(item)
+        out.setdefault("uri", "")
+        return out
+
+    uri = item if isinstance(item, str) else ""
+    m = re.search(r"@[^/@:]+:(\d+)", uri)
+    return {
+        "uri": uri,
+        "remark": uri.rsplit("#", 1)[-1] if "#" in uri else "",
+        "protocol": uri.split("://", 1)[0] if "://" in uri else "",
+        "port": int(m.group(1)) if m else "",
+    }
+
+
+def resolve_links(all_links, sub_text: str = "") -> list[dict]:
+    """决定报告里展示哪些节点：**订阅实际返回的**优先。
+
+    allLinks 会把「合并客户端」和「原始客户端」的重复节点一起列出来
+    （实测 3 入站 × 2 客户端 = 6 条），直接渲染会让用户以为部署重复了。
+    订阅内容才是用户真正导入的东西，所以有订阅就用订阅。
+    """
+    sub_lines = [ln.strip() for ln in (sub_text or "").splitlines()
+                 if ln.strip() and "://" in ln]
+    if sub_lines:
+        return [normalize_link(ln) for ln in sub_lines]
+    return [normalize_link(it) for it in (all_links or [])
+            if isinstance(it, (dict, str))]
+
+
+def build_sub_url(domain: str, port, path: str, subid: str) -> str:
+    """通用订阅（base64 节点列表）。path 允许带或不带首尾斜杠。"""
+    p = (path or "").strip("/")
+    return f"https://{domain}:{port}/" + (f"{p}/{subid}" if p else subid)
+
+
+def build_clash_url(domain: str, port, clash_path: str, subid: str,
+                    enabled: bool) -> str:
+    """Clash / mihomo 订阅（YAML）。
+
+    3x-ui 的 subClashEnable 默认 false，此时该路径是 404 —— 宁可不给，
+    也不要把一个 404 地址写进交付文档。
+    """
+    if not enabled or not (clash_path or "").strip("/"):
+        return ""
+    return build_sub_url(domain, port, clash_path, subid)
+
+
+
 def mask(secret: str, keep: int = 4) -> str:
     if not secret:
         return ""
@@ -187,6 +246,12 @@ def render_md(ctx: dict) -> str:
         A("")
         A("> ⚠️ Clash 系**不能**用 ①：mihomo 只认 YAML，直接导入 ① 会报")
         A("> `yaml: unmarshal errors: cannot unmarshal !!str`。反过来通用客户端也不吃 ②。")
+        A("")
+    else:
+        A("> ⚠️ 面板未启用 Clash 订阅（`subClashEnable=false`），**没有 ② 这条地址**。")
+        A("> Clash 系客户端（Clash Verge Rev / Clash Meta for Android / FlClash）")
+        A("> 无法用 ① 导入（会报 `yaml: unmarshal errors: cannot unmarshal !!str`）。")
+        A("> 需要的话在面板「设置 → 订阅 → Clash」启用后 **重启面板**，再重新生成本文档。")
         A("")
     A(f"合并客户端 email：`{d['merged_email']}`　subId：`{d['merged_subid']}`")
     A("")
@@ -626,30 +691,7 @@ def main() -> int:
     except json.JSONDecodeError:
         links = []
 
-    # ⚠️ 版本差异：
-    #   v3.9.0  /inbounds/allLinks 的 obj 是 [{remark, uri, port, protocol}, ...]
-    #   v3.10.2 /inbounds/allLinks 的 obj 是 ["vless://...", ...]（纯字符串）
-    #   这里统一成对象，后面解析逻辑不分叉。
-    def _norm_link(it):
-        if isinstance(it, dict):
-            return it
-        uri = it if isinstance(it, str) else ""
-        m = re.search(r"@[^/@:]+:(\d+)", uri)
-        return {
-            "uri": uri,
-            "remark": uri.rsplit("#", 1)[-1] if "#" in uri else "",
-            "protocol": uri.split("://", 1)[0] if "://" in uri else "",
-            "port": int(m.group(1)) if m else "",
-        }
-
-    links = [_norm_link(it) for it in links if isinstance(it, (dict, str))]
-
-    # 节点表以「订阅实际返回的节点」为准（= 用户真正导入的内容）。
-    # allLinks 会同时列出合并客户端与原始客户端的重复节点，直接渲染会让人困惑。
-    sub_lines = [ln.strip() for ln in sec.get("SUB", "").splitlines()
-                 if ln.strip() and "://" in ln]
-    if sub_lines:
-        links = [_norm_link(ln) for ln in sub_lines]
+    links = resolve_links(links, sec.get("SUB", ""))
 
     inbounds_raw = sec.get("INBOUNDS", "{}")
     try:
@@ -756,8 +798,9 @@ def main() -> int:
         "api_token": install.get("API_TOKEN") or cfg.get("API_TOKEN", ""),
         "cert_end": cert_end or "(未知)",
         "ver": ver,
-        "sub_url": (f"https://{domain}:{cfg.get('SUB_PORT', '2096')}"
-                    f"/{cfg.get('SUB_PATH', '')}/{cfg.get('MERGED_SUBID', '')}"),
+        "sub_url": build_sub_url(domain, cfg.get("SUB_PORT", "2096"),
+                                 cfg.get("SUB_PATH", ""),
+                                 cfg.get("MERGED_SUBID", "")),
         "merged_email": cfg.get("MERGED_EMAIL", "merged"),
         "merged_subid": cfg.get("MERGED_SUBID", ""),
         "nodes": nodes,
@@ -769,11 +812,12 @@ def main() -> int:
 
     # Clash / mihomo 订阅：3x-ui 用独立的 subClashPath，且必须 subClashEnable=true。
     # 只有启用时才给出第二条 URL，否则会把 404 当订阅发给用户。
-    if panel_kv.get("subClashEnable") == "1" and panel_kv.get("subClashPath"):
-        ctx["clash_url"] = (f"https://{domain}:{cfg.get('SUB_PORT', '2096')}"
-                            f"/{panel_kv['subClashPath']}/{cfg.get('MERGED_SUBID', '')}")
-    else:
-        ctx["clash_url"] = ""
+    ctx["clash_url"] = build_clash_url(
+        domain, cfg.get("SUB_PORT", "2096"),
+        panel_kv.get("subClashPath", ""),
+        cfg.get("MERGED_SUBID", ""),
+        enabled=(panel_kv.get("subClashEnable") == "1"),
+    )
 
     outdir = os.path.abspath(args.out)
     os.makedirs(outdir, exist_ok=True)

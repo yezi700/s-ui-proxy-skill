@@ -157,6 +157,21 @@ python scripts/render_report.py -o .                      # 生成交付文档
 > `install_3xui.sh` 会打印 **API Token**，把它回填到 `deploy.env` 的 `API_TOKEN` 再继续。
 > 该 Token 在 3x-ui v3.9.0 里**只在创建时返回一次**（库里只存 SHA-256），务必立即保存。
 
+### 第 3 步：导入客户端
+
+跑完 `merge_subscription.py` 会打印**两条**订阅地址，格式不同，**按客户端选**：
+
+| 客户端 | 用哪条 | 返回 |
+|---|---|---|
+| v2rayN / v2rayNG / NekoBox / Karing / Hiddify / Shadowrocket | `…/<subPath>/<subId>` | base64 节点列表 |
+| Clash Verge Rev / Clash Meta for Android / FlClash | `…/<subClashPath>/<subId>` | Clash YAML |
+
+把 base64 那条丢给 Clash 会报 `yaml: unmarshal errors: cannot unmarshal !!str` ——
+这是格式不匹配，不是节点坏了。`deploy_nodes.py` 已自动打开 `subClashEnable`；
+手工处理旧面板时要单独开启并 **重启面板**，否则 Clash 路径是 404。
+
+导入后用 `scripts/verify_nodes.sh` 的「4.5 订阅端点」一节可以自检两条地址是否都正常。
+
 ---
 
 ## 使用
@@ -231,8 +246,12 @@ skill 会先按需引导域名准备与 DNS 预检，再按 Step 0→8 执行：
 │   ├── deploy_nodes.py                   # 创建 Reality / Hysteria2 / TUIC 入站
 │   ├── fix_tuic_0rtt.py                  # 关闭 TUIC 0-RTT（会先备份）
 │   ├── merge_subscription.py             # 合并为一条订阅（一个客户端绑多入站）
-│   ├── verify_nodes.sh                   # 端到端拨号验证（含 TUIC UDP relay 验证）
+│   ├── verify_nodes.sh                   # 端到端拨号验证（含 TUIC UDP relay + 订阅端点）
 │   └── render_report.py                  # 生成交付文档 .md / .html
+├── tests/                                # 离线回归测试（不连 VPS、不访问网络）
+│   ├── test_dns.py                       # DNS 预检解析
+│   ├── test_reliability.py               # 配置加载、远端脚本行为
+│   └── test_subscription.py              # 订阅解析 / 两条订阅地址 / 报告渲染
 └── examples/
     └── deploy.env.example                # 参数模板
 ```
@@ -263,6 +282,11 @@ python -m compileall -q scripts tests
 测试在本地模拟 SSH 与面板响应，**不连接真实 VPS、不访问网络**。
 Bash 行为测试在 Linux/macOS 使用系统 `bash`，Windows 使用 Git for Windows 的 Bash；
 未安装时会跳过对应测试。建议在 Linux CI 中对 Python 3.8 / 3.11 / 3.13 运行上述完整测试。
+
+`tests/test_subscription.py` 专门锁死几个真实踩过的回归点：
+`@@@` 分段被无换行输出粘行（表现为报告「节点数：0」）、allLinks 在
+v3.9/v3.10 的形状差异、订阅优先于 allLinks、以及 Clash 订阅未启用时
+不得把 404 地址写进交付文档。
 
 几点设计约束：
 

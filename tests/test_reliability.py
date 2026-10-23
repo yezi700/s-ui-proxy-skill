@@ -161,7 +161,16 @@ curl() {{
 }}
 '''
             script = merge_subscription.REMOTE_SCRIPT.replace('/root/.xui-skill', root)
-            result = subprocess.run([BASH, '-c', prelude + script], capture_output=True,
+            # ⚠️ 写成文件再 `bash <file>`，不要用 `bash -c '<整段脚本>'`：
+            #    Windows 上 Python 会把这段多行脚本按 list2cmdline 规则转义，
+            #    MSYS bash 再按自己的规则解析同一条命令行，两套规则叠加会把引号弄乱
+            #    （表现为 `unexpected EOF while looking for matching '`，
+            #    或 heredoc 被截断后 cat 卡住等 stdin）。
+            #    而且生产环境本来就是「SFTP 落盘 → bash <file>」，这样更贴近真实。
+            script_path = Path(folder, 'remote.sh')
+            script_path.write_text(prelude + script, encoding='utf-8', newline='\n')
+            result = subprocess.run([BASH, str(script_path)], capture_output=True,
+                                    stdin=subprocess.DEVNULL,
                                     env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}, timeout=30)
             actions = Path(folder, 'actions').read_text()
             payload = Path(folder, 'merge.json')
