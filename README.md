@@ -167,8 +167,12 @@ python scripts/render_report.py -o .                      # 生成交付文档
 | Clash Verge Rev / Clash Meta for Android / FlClash | `…/<subClashPath>/<subId>` | Clash YAML |
 
 把 base64 那条丢给 Clash 会报 `yaml: unmarshal errors: cannot unmarshal !!str` ——
-这是格式不匹配，不是节点坏了。`deploy_nodes.py` 已自动打开 `subClashEnable`；
-手工处理旧面板时要单独开启并 **重启面板**，否则 Clash 路径是 404。
+这是格式不匹配，不是节点坏了。
+
+**本 skill 默认就把 Clash 订阅打开**（`ENABLE_CLASH_SUB=1`，`deploy_nodes.py` 第 4 步写入），
+所以部署完两条地址都是现成的。想关掉在 `deploy.env` 里设 `ENABLE_CLASH_SUB=0`；
+`CLASH_SUB_AUTO_DETECT=1`（默认）会让 Clash 系 UA 访问「通用地址」时也直接拿到 YAML，
+省得用户改地址。手工处理旧面板时要单独开启并 **重启面板**，否则 Clash 路径是 404。
 
 导入后用 `scripts/verify_nodes.sh` 的「4.5 订阅端点」一节可以自检两条地址是否都正常。
 

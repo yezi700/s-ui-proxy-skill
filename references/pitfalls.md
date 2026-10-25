@@ -806,6 +806,10 @@ mihomo 内核**只认 Clash YAML**，不会把链接列表转换成 proxies —�
 | `subClashPath` | 面板自动生成的随机路径 | Clash 订阅的独立路径（≠ `subPath`） |
 | `subClashAutoDetect` | `false` | 按 UA 自动切换（实测开启后普通路径也能出 YAML） |
 
+> 本 skill 的 `deploy_nodes.py` **默认把这两个开关都打开**
+> （`ENABLE_CLASH_SUB=1` / `CLASH_SUB_AUTO_DETECT=1`，可在 `deploy.env` 关闭）。
+> 之所以默认开：Clash 系客户端占比高，忘了开就会收到「导入报错」而不是「导入成功」。
+
 开启方式（脚本已内置，见 `deploy_nodes.py` 第 4 步）：
 
 ```bash

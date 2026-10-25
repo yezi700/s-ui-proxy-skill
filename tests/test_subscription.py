@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+import deploy_nodes as dn
 import render_report as rr
 
 
@@ -120,6 +121,37 @@ class ClashUrlTests(unittest.TestCase):
     def test_enabled_but_missing_path(self):
         self.assertEqual(
             rr.build_clash_url('h', '2096', '', 'sid', enabled=True), '')
+
+
+class ClashFlagTests(unittest.TestCase):
+    """deploy_nodes 的 Clash 订阅开关：默认必须是「开」。"""
+
+    def test_default_is_on(self):
+        self.assertEqual(dn.clash_sub_flags({}),
+                         {'ENABLE_CLASH_SUB': '1', 'CLASH_SUB_AUTO_DETECT': '1'})
+
+    def test_empty_value_means_default_on(self):
+        """deploy.env 里写 `ENABLE_CLASH_SUB=`（留空）等价于不写。"""
+        self.assertEqual(dn.clash_sub_flags({'ENABLE_CLASH_SUB': ''}),
+                         {'ENABLE_CLASH_SUB': '1', 'CLASH_SUB_AUTO_DETECT': '1'})
+
+    def test_explicit_off(self):
+        for raw in ('0', 'false', 'no', 'off', 'FALSE'):
+            with self.subTest(raw=raw):
+                got = dn.clash_sub_flags({'ENABLE_CLASH_SUB': raw})
+                self.assertEqual(got['ENABLE_CLASH_SUB'], '0')
+
+    def test_off_also_forces_autodetect_off(self):
+        """关掉总开关时不能留着 autoDetect，否则通用地址仍会按 UA 吐 YAML。"""
+        got = dn.clash_sub_flags({'ENABLE_CLASH_SUB': '0',
+                                  'CLASH_SUB_AUTO_DETECT': '1'})
+        self.assertEqual(got['CLASH_SUB_AUTO_DETECT'], '0')
+
+    def test_autodetect_can_be_disabled_alone(self):
+        got = dn.clash_sub_flags({'ENABLE_CLASH_SUB': '1',
+                                  'CLASH_SUB_AUTO_DETECT': '0'})
+        self.assertEqual(got['ENABLE_CLASH_SUB'], '1')
+        self.assertEqual(got['CLASH_SUB_AUTO_DETECT'], '0')
 
 
 class RenderSmokeTests(unittest.TestCase):

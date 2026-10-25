@@ -162,7 +162,14 @@ python scripts/merge_subscription.py
 | `/<subPath>/<subId>` | base64 节点列表 | v2rayN / v2rayNG / NekoBox / Karing / Hiddify / Shadowrocket |
 | `/<subClashPath>/<subId>` | Clash YAML | Clash Verge Rev / Clash Meta for Android / FlClash |
 
-`subClashEnable` 在 3x-ui 里**默认关闭**，`deploy_nodes.py` 已自动打开；
+`subClashEnable` 在 3x-ui 里**默认关闭**，本 skill **默认替你打开**（`deploy_nodes.py` 第 4 步）：
+
+| deploy.env | 默认 | 作用 |
+|---|---|---|
+| `ENABLE_CLASH_SUB` | `1` | 开启 `subClashEnable`，走独立 `subClashPath` 输出 Clash YAML |
+| `CLASH_SUB_AUTO_DETECT` | `1` | 开启 `subClashAutoDetect`：Clash 系 UA 访问「通用地址」也返回 YAML |
+
+关掉 `ENABLE_CLASH_SUB=0` 会连 `CLASH_SUB_AUTO_DETECT` 一起关（否则「关」得半吊子）。
 手工处理旧面板时要单独开启并 **重启面板**，否则 Clash 路径是 404。
 把 base64 那条给 Clash 会报 `yaml: unmarshal errors: cannot unmarshal !!str`。详见 `pitfalls.md` §6.7。
 

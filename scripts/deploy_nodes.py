@@ -44,6 +44,31 @@ def b64(obj) -> str:
     ).decode("ascii")
 
 
+def _flag(value, default: str = "1") -> str:
+    """把 deploy.env 里的值归一成 '1' / '0'。
+
+    空值视为未设置 → 用默认值。这样 `ENABLE_CLASH_SUB=`（留空）等价于不写。
+    """
+    v = ("" if value is None else str(value)).strip().lower()
+    if not v:
+        return default
+    return "0" if v in ("0", "false", "no", "off") else "1"
+
+
+def clash_sub_flags(cfg: dict) -> dict:
+    """Clash / mihomo 订阅开关，**默认全开**。
+
+    - ENABLE_CLASH_SUB      → subClashEnable：走独立 subClashPath 输出 Clash YAML
+    - CLASH_SUB_AUTO_DETECT → subClashAutoDetect：Clash 系 UA 访问通用地址也给 YAML
+
+    关掉 ENABLE_CLASH_SUB 时，AutoDetect 一并关掉 —— 否则「关」得半吊子，
+    通用地址仍会按 UA 吐 YAML，反而更难排查。
+    """
+    enable = _flag(cfg.get("ENABLE_CLASH_SUB"), "1")
+    auto = _flag(cfg.get("CLASH_SUB_AUTO_DETECT"), "1") if enable == "1" else "0"
+    return {"ENABLE_CLASH_SUB": enable, "CLASH_SUB_AUTO_DETECT": auto}
+
+
 # ---------------------------------------------------------------- 入站构造
 
 def build_reality(cfg: dict, cred: dict) -> dict:
@@ -320,14 +345,15 @@ echo "=== 4. 设置分享地址 + 启用 Clash 订阅 ==="
 curl -fskS -H "$H1" -H "$AUTH" -X POST "$BASE/setting/all" > /root/.xui-skill/settings.json
 # ⚠️ /setting/all 是 POST；/setting/update 是整体覆盖，必须拿全量改完再回写。
 # ⚠️ heredoc 用引号定界符时 bash 不展开 ${VAR}，域名靠 sys.argv 传入。
-# ⚠️ subClashEnable 默认 false —— 此时 /sub/<subId> 只返回 base64 节点列表，
-#    Clash / mihomo 系客户端（Clash Verge Rev、Clash Meta for Android）拿到后
-#    会报 `yaml: unmarshal errors: cannot unmarshal !!str`，因为它们只认 YAML。
-#    这里一并打开，它走独立的 subClashPath，不影响通用订阅。
+# ⚠️ subClashEnable 在 3x-ui 里默认 false —— 此时 /sub/<subId> 只返回 base64 节点列表，
+#    Clash / mihomo 系客户端（Clash Verge Rev、Clash Meta for Android、FlClash）
+#    拿到后报 `yaml: unmarshal errors: cannot unmarshal !!str`，因为它们只认 YAML。
+#    **本项目默认开启**（ENABLE_CLASH_SUB=1），走独立的 subClashPath，不影响通用订阅。
+#    同时默认开 subClashAutoDetect：Clash 系 UA 访问通用地址也直接给 YAML，省一次改地址。
 #    注意：开关要 **重启面板** 才生效（实测重启前访问 subClashPath 是 404）。
-python3 - "$DOMAIN" <<'PYEOF'
+python3 - "$DOMAIN" "$ENABLE_CLASH_SUB" "$CLASH_SUB_AUTO_DETECT" <<'PYEOF'
 import json, sys
-domain = sys.argv[1]
+domain, clash, autodetect = sys.argv[1], sys.argv[2], sys.argv[3]
 p = "/root/.xui-skill/settings.json"
 d = json.load(open(p))
 if d.get("success") is not True or not isinstance(d.get("obj"), dict) or not d["obj"]:
@@ -335,10 +361,13 @@ if d.get("success") is not True or not isinstance(d.get("obj"), dict) or not d["
 obj = d["obj"]
 obj["shareAddrStrategy"] = "custom"
 obj["shareAddr"] = domain
-obj["subClashEnable"] = True
+obj["subClashEnable"] = clash == "1"
+obj["subClashAutoDetect"] = autodetect == "1"
 json.dump(obj, open("/root/.xui-skill/settings.new.json", "w"))
-print("shareAddr ->", domain, "| subClashEnable -> True | 键数:", len(obj))
-print("subClashPath ->", obj.get("subClashPath"))
+print("shareAddr ->", domain, "| 键数:", len(obj))
+print("subClashEnable     ->", obj["subClashEnable"])
+print("subClashAutoDetect ->", obj["subClashAutoDetect"])
+print("subClashPath       ->", obj.get("subClashPath"))
 PYEOF
 curl -fskS -X POST -H "$H1" -H "$AUTH" -H 'Content-Type: application/json' \
   --data-binary @/root/.xui-skill/settings.new.json "$BASE/setting/update" | api_check
@@ -402,7 +431,12 @@ python3 - <<'PYEOF'
 import json
 o = json.load(open("/root/.xui-skill/settings.new.json"))
 print("  通用（base64 节点列表）: /%s/<subId>" % (o.get("subPath") or "").strip("/"))
-print("  Clash / mihomo（YAML） : /%s/<subId>" % (o.get("subClashPath") or "").strip("/"))
+if o.get("subClashEnable"):
+    print("  Clash / mihomo（YAML） : /%s/<subId>%s" % (
+        (o.get("subClashPath") or "").strip("/"),
+        "  [autoDetect=on]" if o.get("subClashAutoDetect") else ""))
+else:
+    print("  Clash / mihomo（YAML） : 已关闭（ENABLE_CLASH_SUB=0）")
 print("  端口: %s" % o.get("subPort"))
 PYEOF
 """
@@ -471,9 +505,12 @@ def main() -> int:
             sys.stderr.write(err)
             return rc
 
-        exports = env_exports({k: cfg[k] for k in (
+        # Clash 订阅默认开启（可用 deploy.env 的 ENABLE_CLASH_SUB=0 关掉）。
+        # 开关必须作为独立环境变量注入，远端脚本靠 sys.argv 读取。
+        clash_flags = clash_sub_flags(cfg)
+        exports = env_exports({**{k: cfg[k] for k in (
             "PANEL_PORT", "PANEL_PATH", "DOMAIN", "API_TOKEN", "PANEL_USER", "SERVER_IP"
-        ) if k in cfg})
+        ) if k in cfg}, **clash_flags})
         rc, out, err = run(
             cli, f"{exports}\nbash /root/.xui-skill/_deploy.sh 2>&1",
             timeout=600,
