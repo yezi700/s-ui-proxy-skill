@@ -17,9 +17,12 @@ export DEBIAN_FRONTEND=noninteractive
 SSH_PORT="${SSH_PORT:-22}"
 PANEL_PORT="${PANEL_PORT:-46821}"
 SUB_PORT="${SUB_PORT:-2096}"
-REALITY_PORT="${REALITY_PORT:-443}"
-HY2_PORT="${HY2_PORT:-443}"
+# ⚠️ 全部避开 443：实测 443 被针对性干扰（Reality 认证失败、Hy2 timeout），
+#    换到 2053/2083 立刻恢复。详见 references/pitfalls.md §1。
+ANYTLS_PORT="${ANYTLS_PORT:-8443}"
 TUIC_PORT="${TUIC_PORT:-8443}"
+REALITY_PORT="${REALITY_PORT:-2053}"
+HY2_PORT="${HY2_PORT:-2083}"
 HY2_HOP_RANGE="${HY2_HOP_RANGE:-58888:60888}"
 ACME_PORT="${ACME_PORT:-80}"
 # 1 = 屏蔽 IPv6，强制代理仅走 IPv4 出口（默认开启）
@@ -33,9 +36,10 @@ SSH_PORT        = ${SSH_PORT}
 ACME_PORT       = ${ACME_PORT}
 PANEL_PORT      = ${PANEL_PORT}
 SUB_PORT        = ${SUB_PORT}
+ANYTLS_PORT     = ${ANYTLS_PORT} (tcp)
+TUIC_PORT       = ${TUIC_PORT} (udp)
 REALITY_PORT    = ${REALITY_PORT} (tcp)
 HY2_PORT        = ${HY2_PORT} (udp)
-TUIC_PORT       = ${TUIC_PORT} (udp)
 HY2_HOP_RANGE   = ${HY2_HOP_RANGE} (udp)
 DISABLE_IPV6    = ${DISABLE_IPV6} (1=屏蔽 IPv6，仅 IPv4 出口)
 DNS_SERVERS     = ${DNS_SERVERS}
@@ -63,10 +67,10 @@ date
 # ---------------------------------------------------------------- 3. 防火墙
 echo ""
 echo "########## 3. 备份现有 iptables 规则（回滚用） ##########"
-mkdir -p /root/.xui-skill
-cp -f /etc/iptables/rules.v4 /root/.xui-skill/rules.v4.bak 2>/dev/null || true
-cp -f /etc/iptables/rules.v6 /root/.xui-skill/rules.v6.bak 2>/dev/null || true
-echo "已备份到 /root/.xui-skill/rules.v{4,6}.bak"
+mkdir -p /root/.sui-skill
+cp -f /etc/iptables/rules.v4 /root/.sui-skill/rules.v4.bak 2>/dev/null || true
+cp -f /etc/iptables/rules.v6 /root/.sui-skill/rules.v6.bak 2>/dev/null || true
+echo "已备份到 /root/.sui-skill/rules.v{4,6}.bak"
 
 echo "########## 4. 写入 IPv4 规则 ##########"
 cat > /etc/iptables/rules.v4 <<EOF
@@ -79,10 +83,11 @@ cat > /etc/iptables/rules.v4 <<EOF
 -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${SSH_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${ACME_PORT} -j ACCEPT
+-A INPUT -p tcp -m tcp --dport ${ANYTLS_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${REALITY_PORT} -j ACCEPT
+-A INPUT -p udp -m udp --dport ${TUIC_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_HOP_RANGE} -j ACCEPT
--A INPUT -p udp -m udp --dport ${TUIC_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${SUB_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${PANEL_PORT} -j ACCEPT
 -A INPUT -m conntrack --ctstate INVALID -j DROP
@@ -122,10 +127,11 @@ cat > /etc/iptables/rules.v6 <<EOF
 -A INPUT -p ipv6-icmp -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${SSH_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${ACME_PORT} -j ACCEPT
+-A INPUT -p tcp -m tcp --dport ${ANYTLS_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${REALITY_PORT} -j ACCEPT
+-A INPUT -p udp -m udp --dport ${TUIC_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_HOP_RANGE} -j ACCEPT
--A INPUT -p udp -m udp --dport ${TUIC_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${SUB_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${PANEL_PORT} -j ACCEPT
 -A INPUT -m conntrack --ctstate INVALID -j DROP
@@ -142,12 +148,12 @@ fi
 
 echo "########## 6. 应用规则（带 180 秒自动回滚保险） ##########"
 # 万一规则写错把自己锁在外面，180 秒后自动恢复旧规则。
-# 确认能正常登录后，执行： kill "$(cat /root/.xui-skill/fw_rollback.pid)"
-nohup sh -c "sleep 180; iptables-restore < /root/.xui-skill/rules.v4.bak 2>/dev/null; \
-             ip6tables-restore < /root/.xui-skill/rules.v6.bak 2>/dev/null" \
+# 确认能正常登录后，执行： kill "$(cat /root/.sui-skill/fw_rollback.pid)"
+nohup sh -c "sleep 180; iptables-restore < /root/.sui-skill/rules.v4.bak 2>/dev/null; \
+             ip6tables-restore < /root/.sui-skill/rules.v6.bak 2>/dev/null" \
       >/dev/null 2>&1 &
-echo $! > /root/.xui-skill/fw_rollback.pid
-echo "回滚定时器 PID: $(cat /root/.xui-skill/fw_rollback.pid)（180 秒后触发）"
+echo $! > /root/.sui-skill/fw_rollback.pid
+echo "回滚定时器 PID: $(cat /root/.sui-skill/fw_rollback.pid)（180 秒后触发）"
 
 iptables-restore < /etc/iptables/rules.v4
 ip6tables-restore < /etc/iptables/rules.v6
@@ -166,8 +172,8 @@ if [ "${DISABLE_IPV6}" = "1" ]; then
 
   # ⚠️ 必须先换 DNS：很多 VPS 的 resolv.conf 里混着 IPv6 nameserver，
   #    关掉 IPv6 后解析器会去尝试不可达的服务器，拖慢甚至中断 DNS。
-  cp -a /etc/resolv.conf /root/.xui-skill/resolv.conf.bak 2>/dev/null || true
-  echo "--- 原 resolv.conf（已备份到 /root/.xui-skill/resolv.conf.bak）---"
+  cp -a /etc/resolv.conf /root/.sui-skill/resolv.conf.bak 2>/dev/null || true
+  echo "--- 原 resolv.conf（已备份到 /root/.sui-skill/resolv.conf.bak）---"
   sed 's/^/    /' /etc/resolv.conf
   {
     echo "# 由 3xui-proxy-skill 写入：仅使用 IPv4 DNS（配合 IPv6 屏蔽）"
@@ -200,7 +206,7 @@ EOF
     rm -f /etc/sysctl.d/99-disable-ipv6.conf
     sysctl --system >/dev/null 2>&1
     chattr -i /etc/resolv.conf 2>/dev/null || true
-    cp -a /root/.xui-skill/resolv.conf.bak /etc/resolv.conf 2>/dev/null || true
+    cp -a /root/.sui-skill/resolv.conf.bak /etc/resolv.conf 2>/dev/null || true
     echo "    已回滚。"
   else
     echo "    IPv4 出网与 DNS 正常。"
@@ -241,4 +247,4 @@ ss -lntup | head -30 || true
 echo ""
 echo "########## BASE SETUP DONE ##########"
 echo "提醒：确认 SSH 仍可登录后，执行下面这条关掉回滚定时器："
-echo "  kill \$(cat /root/.xui-skill/fw_rollback.pid) 2>/dev/null"
+echo "  kill \$(cat /root/.sui-skill/fw_rollback.pid) 2>/dev/null"

@@ -1,196 +1,180 @@
-# 3x-ui 非交互安装参数
+# 安装环境与参数
 
-3x-ui 官方安装脚本默认是**交互式**的（会依次问你端口、路径、用户名、密码、SSL 方式）。
-自动化部署必须让它闭嘴。它支持通过环境变量传入全部答案。
+## 一、版本与架构
 
-> 参考实现：`scripts/install_3xui.sh`
+S-UI 的 release 包命名：
 
----
-
-## 1. 总开关
-
-```bash
-export XUI_NONINTERACTIVE=1
+```
+s-ui-linux-<arch>.tar.gz      # arch: amd64 / arm64 / armv7 / armv6 / armv5 / 386 / s390x
 ```
 
-只要设了这个，脚本就不再读 stdin，全部参数从环境变量取。**缺哪个就用默认值**，
-所以宁可多设几个，也别指望它报错提醒你。
+包内结构：
 
----
+```
+s-ui/
+├── sui               # 主程序（面板 + 内嵌 sing-box）
+├── s-ui.sh           # 交互式管理脚本
+└── s-ui.service      # systemd 单元
+```
 
-## 2. 环境变量清单
+**sing-box 内核是内嵌在 `sui` 二进制里的**（`bin/` 目录不存在），
+所以不需要单独下载核心，也不能用 `strings` 找 `sing-box` 版本来判断。
 
-| 变量 | 含义 | 示例 | 备注 |
+查看实际内核版本：
+
+```bash
+journalctl -u s-ui -n 50 | grep -i sing-box
+# 或
+curl -sk -b cookies "$BASE/api/status?r=sbd"
+```
+
+指定版本安装：
+
+```bash
+SUI_VERSION=1.6.7 python scripts/ssh_run.py -f scripts/install_sui.sh
+```
+
+## 二、目录结构
+
+```
+/usr/local/s-ui/
+├── sui                    # 主程序
+├── s-ui.sh                # 管理脚本（/usr/bin/s-ui 软链到它）
+├── db/
+│   ├── s-ui.db            # 全部配置（SQLite）
+│   ├── s-ui.db-shm
+│   └── s-ui.db-wal
+└── install-result.env     # 本 skill 写入的安装结果
+```
+
+证书默认放 `/root/cert/<域名>/`，与面板、订阅、各节点共用。
+
+## 三、systemd 单元
+
+```ini
+[Unit]
+Description=s-ui Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/usr/local/s-ui/
+ExecStart=/usr/local/s-ui/sui
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=1048576        # 代理每连接两个 fd，默认 1024 几百个客户端就爆
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only      # 读：acme.sh 的证书在 /root/cert 下
+```
+
+`ProtectHome=read-only` 不能改成 `true` —— 面板要读 `/root/cert/` 下的证书。
+
+常用命令：
+
+```bash
+systemctl status s-ui
+systemctl restart s-ui
+journalctl -u s-ui -f
+s-ui            # 交互菜单：start / stop / restart / log / update / uninstall
+```
+
+## 四、环境变量
+
+| 变量 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `XUI_NONINTERACTIVE` | 关闭交互 | `1` | 必设 |
-| `XUI_USERNAME` | 面板用户名 | `admin` | |
-| `XUI_PASSWORD` | 面板密码 | `YourStrongPanelPassword` | 建议随机生成 |
-| `XUI_PANEL_PORT` | 面板端口 | `46821` | 别用 54321（太常见） |
-| `XUI_WEB_BASE_PATH` | 面板 URL 路径前缀 | `a1b2c3d4e5f6g7h8` | 随机 16 位，去掉首尾 `/` |
-| `XUI_SSL_MODE` | SSL 模式 | `domain` | 见 §3 |
-| `XUI_DOMAIN` | 域名 | `jp.example.com` | `XUI_SSL_MODE=domain` 时必填 |
-| `XUI_ACME_HTTP_PORT` | ACME HTTP-01 端口 | `80` | 需 80 端口可达 |
-| `XUI_SERVER_IP` | 服务器公网 IP | `203.0.113.10` | `XUI_SSL_MODE=ip` 时用 |
+| `SUI_LOG_LEVEL` | debug/info/warn/error | info | 日志级别 |
+| `SUI_DEBUG` | boolean | false | 调试模式 |
+| `SUI_BIN_FOLDER` | string | bin | 外部二进制目录 |
+| `SUI_DB_FOLDER` | string | db | 数据库目录 |
+| `SINGBOX_API` | string | — | 外部 sing-box API 地址 |
 
-`XUI_SSL_MODE` 取值：
+改环境变量要改 `s-ui.service` 的 `Environment=` 然后 `systemctl daemon-reload`。
 
-| 值 | 行为 | 前提 |
+## 五、面板关键设置
+
+全部存在 `db/s-ui.db` 的 `settings` 表，也可以走 API 改。
+
+### 5.1 面板与订阅
+
+| 键 | 说明 |
+|---|---|
+| `webPort` | 面板端口，默认 2095 |
+| `webPath` | 面板路径，默认 `/app/`，**建议改成随机 16 位 hex** |
+| `webDomain` | 面板域名，影响 SNI 校验与订阅里的地址 |
+| `webCertFile` / `webKeyFile` | 面板 HTTPS 证书 |
+| `subPort` | 订阅端口，默认 2096 |
+| `subPath` | 订阅路径，默认 `/sub/` |
+| `subDomain` | 订阅域名 |
+| `subCertFile` / `subKeyFile` | 订阅 HTTPS 证书 |
+
+⚠️ 改 `webPort` / `webPath` / `webCertFile` / `webKeyFile` 后**必须
+`systemctl restart s-ui`**，不会自动生效。
+
+### 5.2 订阅行为
+
+| 键 | 建议值 | 说明 |
 |---|---|---|
-| `domain` | 用 acme.sh 申请 Let's Encrypt 证书 | 域名已解析到本机 + 80 端口可达 |
-| `ip` | 自签 IP 证书 | 浏览器会报不受信任 |
-| `none` | 纯 HTTP | 面板明文传输，**不推荐** |
+| `subShowInfo` | `true` | 响应头带流量信息 |
+| `subClashUdp` | `true` | Clash 输出给 UDP 节点补 `udp: true` |
+| `subEncode` | `true` | 通用订阅返回 base64 |
+| `subRemarkPrefix` | `false` | 节点名不拼 client remark，避免 `US-US-xxx` |
+| `subUpdates` | `12` | 订阅更新间隔提示（小时） |
 
----
+### 5.3 其他
 
-## 3. 完整安装片段
+| 键 | 说明 |
+|---|---|
+| `timeLocation` | 时区，默认 `Asia/Tehran`，**改成 `Asia/Shanghai`** |
+| `sessionMaxAge` | 会话有效期，0 = 不过期 |
+| `maintenance` | 维护模式，开启后核心停止 |
 
-```bash
-#!/bin/bash
-set -e
-export DEBIAN_FRONTEND=noninteractive
-cd /root || exit 1
-
-# 1) 下载官方安装脚本
-curl -Ls --retry 3 --connect-timeout 20 -o /root/3xui-install.sh \
-  https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh
-
-# 2) 非交互参数
-export XUI_NONINTERACTIVE=1
-export XUI_USERNAME="$PANEL_USER"
-export XUI_PASSWORD="$PANEL_PASS"
-export XUI_PANEL_PORT="$PANEL_PORT"
-export XUI_WEB_BASE_PATH="$PANEL_PATH"
-export XUI_SSL_MODE="domain"
-export XUI_DOMAIN="$DOMAIN"
-export XUI_ACME_HTTP_PORT="80"
-export XUI_SERVER_IP="$SERVER_IP"
-
-# 3) 打印参数（打码）
-env | grep '^XUI_' | sed 's/\(PASSWORD=\).*/\1***/'
-
-# 4) 执行
-bash /root/3xui-install.sh 2>&1 | tee /root/3xui-install.log
-echo "退出码: ${PIPESTATUS[0]}"
-```
-
-⚠️ **用 `tee` 保留日志**。安装脚本偶发失败（acme 申请超时、网络抖动），
-没有日志就只能重装。`${PIPESTATUS[0]}` 才是安装脚本本身的退出码，
-`$?` 拿到的是 `tee` 的。
-
----
-
-## 4. 安装后回读结果
-
-安装脚本会把关键结果写到 `/etc/x-ui/install-result.env`（3x-ui 较新版本的行为）：
+## 六、升级
 
 ```bash
-cat /etc/x-ui/install-result.env
-# 一般包含 PANEL_URL / USERNAME / PASSWORD / WEB_BASE_PATH / API_TOKEN 等
+# 备份
+cp /usr/local/s-ui/db/s-ui.db /root/s-ui.db.bak.$(date +%Y%m%d-%H%M)
+
+# 用面板内一键更新（v1.6.7 起支持），或手动：
+SUI_VERSION=<新版本> python scripts/ssh_run.py -f scripts/install_sui.sh
 ```
 
-**必须回读并校验**，不能假设安装成功：
+`install_sui.sh` 是幂等的：已存在的 DB 会先备份再保留，
+settings 里的端口/路径不会被覆盖成默认值（脚本只写自己管的那几个键）。
+
+跨大版本升级（如 1.5 → 1.6）时，S-UI 会做一次性配置迁移。
+注意 v1.6.0 起有两类**不会自动迁移**的项：
+
+1. 使用旧地址过滤器的 DNS 规则（`ip_cidr` / `ip_is_private` / IP 规则集）
+2. 已弃用的 `strategy` DNS 规则动作
+
+迁移日志会记在 `journalctl -u s-ui` 里，升级后先看一眼。
+
+## 七、卸载
 
 ```bash
-systemctl is-active x-ui        # 期望 active
-systemctl is-enabled x-ui       # 期望 enabled
-ss -lntp | grep -E ":${PANEL_PORT}"   # 端口在听
-
-# 面板设置（含 API Token）
-/usr/local/x-ui/x-ui setting -show
-
-# 证书目录
-ls -l /root/cert/${DOMAIN}/
+systemctl disable s-ui --now
+rm -f /etc/systemd/system/s-ui.service
+systemctl daemon-reload
+rm -rf /usr/local/s-ui
+rm -f /usr/bin/s-ui
 ```
 
-拿 API Token（脚本没给的话）：
+证书和 `/etc/iptables/rules.v4` 不会动，需要单独清理。
 
-```bash
-sqlite3 /etc/x-ui/x-ui.db "select value from settings where key='apiToken';"
-```
+## 八、从 3x-ui 迁移
 
----
-
-## 5. 证书（acme.sh）
-
-3x-ui 安装脚本内部用 acme.sh，安装后证书落在：
-
-```
-/root/cert/<域名>/fullchain.pem
-/root/cert/<域名>/privkey.pem
-```
-
-**Hysteria2 与 TUIC 直接引用这两个文件**，不要复制、不要改属主/权限。
-
-手动续期与重新签发：
-
-```bash
-# 强制续期
-/root/.acme.sh/acme.sh --cron --home /root/.acme.sh
-
-# 重新签发并安装到 /root/cert
-/root/.acme.sh/acme.sh --issue -d "$DOMAIN" --standalone --keylength ec-256 --force
-/root/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
-  --fullchain-file /root/cert/$DOMAIN/fullchain.pem \
-  --key-file      /root/cert/$DOMAIN/privkey.pem \
-  --reloadcmd     "systemctl restart x-ui"
-```
-
-⚠️ `--standalone` 需要 80 端口空闲。面板本身也监听 443，不冲突，
-但如果之前有 nginx/caddy 占着 80，先停掉。
-
-⚠️ **续期后要重启 x-ui**（或让 `--reloadcmd` 做掉），否则面板/节点还在用旧证书句柄。
-
----
-
-## 6. 面板设置项（安装后再通过 API 调）
-
-安装脚本只设基础项。以下建议用 `/setting/update` 补上（**注意是整体覆盖**，
-先 `POST /setting/all` 拿全量再改，见 `xui-api.md` §5.2）：
-
-| 键 | 建议值 | 原因 |
+| 项 | 3x-ui | S-UI |
 |---|---|---|
-| `webDomain` | 你的域名 | 启用 Host 校验，防 IP 扫描；副作用见 `xui-api.md` §1.2 |
-| `shareAddrStrategy` | `custom` | 否则分享链接里是 `127.0.0.1` |
-| `shareAddr` | 你的域名 | 同上 |
-| `subPort` | `2096` | 订阅端口 |
-| `subPath` | 随机 | 订阅路径 |
-| `subEnable` | `true` | 开启订阅服务 |
-| `expireDiff` / `trafficDiff` | 按需 | 到期/流量提醒 |
+| 内核 | Xray | sing-box（内嵌） |
+| 数据目录 | `/etc/x-ui/` | `/usr/local/s-ui/db/` |
+| 配置 | Xray JSON（`bin/config.json`） | SQLite（`db/s-ui.db`） |
+| 热更新 | gRPC（不重写 config.json） | 保存即热加载 |
+| 改设置后 | 需 `x-ui restart` | 面板端口类需 `systemctl restart s-ui` |
 
----
-
-## 7. 版本与升级
+迁移步骤见 SKILL.md「从 3x-ui 迁移」一节。**3x-ui 只是 stop + disable，
+数据和证书完整保留**，回退只需一条命令：
 
 ```bash
-# 查看当前版本
-/usr/local/x-ui/x-ui -v
-
-# 内置 Xray 版本
-/usr/local/x-ui/bin/xray-linux-amd64 -version
+systemctl enable --now x-ui && systemctl disable --now s-ui
 ```
-
-3x-ui v3.9.0 内置 **Xray-core 26.9.30**。
-
-⚠️ **不要盲目升级 Xray**。26.9.8 起 REALITY 强制要求客户端支持
-`X25519MLKEM768`，会导致 sing-box 系客户端全部连不上（详见
-`protocols-and-clients.md` §3）。
-
-升级前务必：
-
-```bash
-cp /etc/x-ui/x-ui.db /root/x-ui-backup-$(date +%Y%m%d-%H%M).db
-```
-
----
-
-## 8. 卸载（谨慎）
-
-```bash
-# 官方卸载
-x-ui uninstall
-
-# 残留清理
-rm -rf /etc/x-ui /usr/local/x-ui /root/cert
-```
-
-⚠️ 会**连证书一起删掉**，且不可恢复。执行前确认用户意图。

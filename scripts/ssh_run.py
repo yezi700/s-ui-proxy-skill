@@ -31,12 +31,8 @@ import sys
 
 try:
     import paramiko
-except ImportError:
-    sys.stderr.write(
-        "缺少 paramiko。请执行：pip install paramiko\n"
-        "若当前解释器不方便安装，改用系统 Python 运行本脚本。\n"
-    )
-    raise SystemExit(2)
+except ImportError:  # 远端执行时（VPS 上）不需要 paramiko，只用到 load_env
+    paramiko = None
 
 
 # ---------------------------------------------------------------- 配置加载
@@ -66,6 +62,10 @@ def load_env() -> dict:
                 key, _, val = line.partition("=")
                 key = key.strip()
                 val = val.strip()
+                # 剥行内注释：`ANYTLS_PORT=8443  # TCP` 里的值只能是 8443。
+                # 带引号的值不剥，避免密码里的 # 被误伤。
+                if val and val[0] not in "\"'" and " #" in val:
+                    val = val.split(" #", 1)[0].rstrip()
                 if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
                     val = val[1:-1]
                 if key:
@@ -75,14 +75,19 @@ def load_env() -> dict:
     # 环境变量覆盖文件
     for key in list(cfg.keys()) + [
         "VPS_HOST", "VPS_PORT", "VPS_USER", "VPS_PASS", "VPS_KEY",
-        "DOMAIN", "SERVER_IP", "PANEL_PORT", "PANEL_PATH", "PANEL_USER",
-        "PANEL_PASS", "SUB_PORT", "SUB_PATH", "API_TOKEN", "CERT_DIR",
-        "REALITY_PORT", "HY2_PORT", "TUIC_PORT", "HY2_HOP_RANGE",
-        "NODE_PREFIX", "MERGED_EMAIL", "MERGED_SUBID", "ACME_PORT", "SSH_PORT",
-        "REALITY_DEST", "REALITY_SNI", "REALITY_PRIV", "REALITY_PUB", "REALITY_SID",
+        "DOMAIN", "SERVER_IP", "NODE_PREFIX", "CERT_DIR",
+        # 面板 / 订阅
+        "SUI_VERSION", "PANEL_USER", "PANEL_PASS", "PANEL_PORT", "PANEL_PATH", "PANEL_TLS",
+        "SUB_PORT", "SUB_PATH", "SUB_ID",
+        # 节点端口
+        "ANYTLS_PORT", "TUIC_PORT", "HY2_PORT", "REALITY_PORT", "HY2_HOP_RANGE",
+        "ACME_PORT", "SSH_PORT",
+        # Reality 参数
+        "REALITY_SNI", "REALITY_PRIV", "REALITY_PUB", "REALITY_SID", "REALITY_UUID",
+        # 节点凭据
+        "ANYTLS_PASSWORD", "TUIC_UUID", "TUIC_PASSWORD", "HY2_PASSWORD",
+        # 系统
         "DISABLE_IPV6", "DNS_SERVERS",
-        "VERIFY_REALITY_UUID", "VERIFY_HY2_AUTH", "VERIFY_HY2_OBFS_PW",
-        "VERIFY_TUIC_UUID", "VERIFY_TUIC_PASSWORD",
     ]:
         if key in os.environ:
             cfg[key] = os.environ[key]
@@ -100,7 +105,13 @@ def _need(cfg: dict, key: str, hint: str = "") -> str:
 
 # ---------------------------------------------------------------- SSH 连接
 
-def get_client(cfg: dict | None = None) -> paramiko.SSHClient:
+def get_client(cfg: dict | None = None):
+    if paramiko is None:
+        sys.stderr.write(
+            "缺少 paramiko，无法建立 SSH 连接。请执行：pip install paramiko\n"
+            f"当前解释器：{sys.executable}\n"
+        )
+        raise SystemExit(2)
     cfg = cfg or load_env()
     host = _need(cfg, "VPS_HOST", "例：VPS_HOST=1.2.3.4")
     port = int(cfg.get("VPS_PORT") or 22)
@@ -129,7 +140,7 @@ def get_client(cfg: dict | None = None) -> paramiko.SSHClient:
     return cli
 
 
-def run(cli: paramiko.SSHClient, command: str, timeout: int = 300,
+def run(cli, command: str, timeout: int = 300,
         pty: bool = False, get_pty: bool | None = None):
     """执行命令，返回 (exit_code, stdout, stderr)。"""
     if get_pty is not None:      # 兼容旧调用
@@ -157,7 +168,22 @@ def env_exports(cfg: dict) -> str:
     return "\n".join(lines)
 
 
-def put_text(cli: paramiko.SSHClient, text: str, remote_path: str) -> None:
+def env_prefix(cfg: dict) -> str:
+    """把配置转成 `env K=V K2=V2` 前缀，用于单行命令。
+
+    远端执行 Python 脚本时用它代替上传 deploy.env —— 少一份明文凭据落盘。
+    """
+    parts = []
+    for key, val in cfg.items():
+        if not key or not isinstance(val, str) or not val:
+            continue
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        parts.append(f"{key}={shlex.quote(val)}")
+    return "env " + " ".join(parts) if parts else ""
+
+
+def put_text(cli, text: str, remote_path: str) -> None:
     """把字符串内容写到远端文件（走 SFTP）。"""
     sftp = cli.open_sftp()
     try:
@@ -202,13 +228,13 @@ def main() -> int:
                 sys.stderr.write("\n[stderr]\n" + err)
             return rc
 
-        # -f：上传到 /root/.xui-skill/<name> 再执行
+        # -f：上传到 /root/.sui-skill/<name> 再执行
         local = os.path.abspath(args.file)
         if not os.path.isfile(local):
             sys.stderr.write(f"文件不存在：{local}\n")
             return 2
         name = os.path.basename(local)
-        remote = f"/root/.xui-skill/{name}"
+        remote = f"/root/.sui-skill/{name}"
 
         with io.open(local, "r", encoding="utf-8", newline="\n") as fh:
             content = fh.read()
