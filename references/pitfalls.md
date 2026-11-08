@@ -542,6 +542,30 @@ mihomo 的 AnyTLS 代理如果订阅里没有 `udp: true`，UDP 默认关闭，
 
 把 base64 那条填给 Clash，报 `yaml: unmarshal errors: cannot unmarshal !!str`。
 
+### 6.7 数 Clash 订阅里的节点数，别按 `- name:` 数
+
+S-UI 的 YAML 生成器只在每个节点的**第一个键**前面写 `- `，而键是按字母序排的：
+
+```yaml
+proxies:
+    - name: JP-AnyTLS-8443        # name 排第一 → 有 "- name:"
+      password: ...
+    - alpn:                     # Hysteria2 的 alpn 排第一 → "- " 在 alpn 上
+        - h3
+      name: JP-Hysteria2-2083     # 这一行没有 "- "
+```
+
+所以 `grep -c '^    - name: '` 只会数到 AnyTLS 一个（再加 proxy-groups 里的），
+四个节点被数成 1~2 个，很容易误判成「订阅少了节点」。
+
+正确做法是数 `proxies:` 段里所有 `    - ` 开头的行：
+
+```bash
+awk '/^proxies:/{f=1;next} /^[a-zA-Z_-]+:/{f=0} f&&/^    - /{c++} END{print c+0}' sub.yaml
+```
+
+`verify_nodes.sh` 已按这个改。
+
 ---
 
 ## §7 验证方法

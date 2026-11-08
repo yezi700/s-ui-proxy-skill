@@ -177,9 +177,11 @@ check_sub() {
     clash)
       if grep -q "^proxies:" /tmp/sub.body; then
         local n
-        # 节点是 proxies 列表项，缩进 4 空格 + "- name:"；
-        # 用 6 空格的 "^      name:" 会把 proxy-groups 里的 Auto 也算进来，数目偏多
-        n="$(grep -cE "^    - name: " /tmp/sub.body || true)"
+        # ⚠️ 不能数 "- name:"：S-UI 的 YAML 生成器只在每个节点的**第一个键**
+        #    前面写 "- "，而键是按字母序排的 —— Hysteria2 首键是 alpn、
+        #    Reality 是 client-fingerprint、SS 是 cipher，那几条就没有 "- name:"。
+        #    正确做法是数 proxies 段里所有 "    - " 开头的行。
+        n="$(awk '/^proxies:/{f=1;next} /^[a-zA-Z_-]+:/{f=0} f&&/^    - /{c++} END{print c+0}' /tmp/sub.body)"
         ok "${label} 200，Clash YAML，节点 ${n} 个"
         if grep -q "^      udp: true" /tmp/sub.body; then
           ok "${label} 含 udp: true"
