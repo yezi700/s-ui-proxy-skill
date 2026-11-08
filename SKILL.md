@@ -4,7 +4,7 @@ description: 在全新 VPS 上部署 S-UI（sing-box 内核）面板与抗封锁
 metadata:
   description_zh: 在 VPS 上部署 S-UI（sing-box）面板与 AnyTLS / Hysteria2 / Reality / Shadowsocks 节点
   description_en: Deploy an S-UI (sing-box) panel with AnyTLS, Hysteria2, VLESS-Reality and Shadowsocks 2022 nodes
-  version: 1.1.0
+  version: 1.2.0
 ---
 
 # S-UI 代理节点部署
@@ -68,7 +68,7 @@ Reality 2053/TCP、Shadowsocks 2087/TCP。详见 `references/pitfalls.md` §1。
 无 TLS 握手、握手往返最少、客户端兼容面比 AnyTLS 还广（Xray / Surge / QuantumultX 都认）。
 
 用户明确要 TUIC 时：`TUIC_PORT` 填个端口即可，但**先告知上面这个实测结论**，
-别让人装完发现慢再回来排查。详见 `references/pitfalls.md` §8。
+别让人装完发现慢再回来排查。详见 `references/pitfalls.md` §6.8。
 
 ## 前置条件
 
@@ -223,7 +223,7 @@ python scripts/render_report.py -o .
 
 1. **所有节点避开 443**（见上）。用户坚持要 443 时，先做对照实验说明风险。
 2. **TUIC 默认不部署**：实测在部分线路上被限速到 0.2~0.4 Mbps，换端口换客户端都一样
-   （pitfalls §8）。要开就把 `TUIC_PORT` 填上，且**必须用独立 TLS 对象带 `alpn:["h3"]`**，
+   （pitfalls §6.8）。要开就把 `TUIC_PORT` 填上，且**必须用独立 TLS 对象带 `alpn:["h3"]`**，
    与 AnyTLS 共用会报 `tls: server did not select an ALPN protocol`。
 3. **保存 clients 必须带 `"links":[]` 和 `inbounds`**，否则报
    `save: unexpected end of JSON input`（Go 侧对 nil 做 Unmarshal，报错完全误导）。
@@ -240,8 +240,29 @@ python scripts/render_report.py -o .
 11. **删入站要连 `clients.config` 一起清**，否则订阅里继续生成死节点（pitfalls §3.11）。
    删入站的 `del` 传的是 **tag 字符串**，不是 id（pitfalls §3.5）。
 12. **SS2022 的客户端 config 键是 `shadowsocks16`**，服务端 `options` 必须同时有
-   `method` 和 `password`，否则核心整个起不来（pitfalls §9）。
+   `method` 和 `password`，否则核心整个起不来（pitfalls §6.9）。
 13. 涉及删除、覆盖、改端口等破坏性操作前，先向用户说明并取得确认。
+
+## 排查入口
+
+用户说「连不上 / 很慢 / 突然不能用了」时，**先查症状速查表**，不要从头读文档：
+
+```
+references/pitfalls.md  →  开头的「症状速查」表格
+```
+
+那张表把 20+ 个实际踩过的问题按「你看到的报错」索引到具体章节。
+按层定位：服务端在跑？端口通？协议握手成功？（三层验证见 pitfalls §7.1）
+
+三条最常命中的：
+
+| 症状 | 先做什么 |
+|---|---|
+| 能连但极慢（几百 KB/s） | 换端口做对照实验；QUIC 系节点换 TCP 系验证（pitfalls §6.8） |
+| 全部节点突然不通 | 换端口重试 —— 大概率是端口被干扰，不是协议失效（§1.1） |
+| 只有一个节点连不上 | 先问客户端内核，再看兼容性矩阵（§6.1） |
+
+**不要一上来就重装面板或换协议。** 先做对照实验定位层次。
 
 ## 参考资料
 
@@ -249,8 +270,8 @@ python scripts/render_report.py -o .
 
 | 文件 | 何时读 |
 |---|---|
-| `references/pitfalls.md` | **每次部署都读** —— 汇集了实际踩过的坑与修复方式 |
-| `references/sui-api.md` | 需要直接调面板 API 时（两套 API、鉴权、对象结构） |
+| `references/pitfalls.md` | **每次部署都读**，出问题先看开头的「症状速查」表 |
+| `references/sui-api.md` | 需要直接调面板 API 时（两套 API、鉴权、对象结构、del 语义） |
 | `references/protocols-and-clients.md` | 选协议、排查"某客户端连不上"、写兼容性矩阵时 |
 | `references/install-env.md` | 需要自定义安装参数（版本、端口、证书路径）时 |
 | `references/domain-and-dns.md` | 未准备域名、接入 Cloudflare、DNS 预检失败时 |
@@ -263,10 +284,13 @@ python scripts/render_report.py -o .
 | `scripts/ssh_run.py` | 通用 SSH 执行器（跑单条命令或整个脚本，自动注入 deploy.env） |
 | `scripts/sui_api.py` | 面板 API 客户端（Cookie 认证 + Origin 头；也可当 CLI 用） |
 | `scripts/setup_base.sh` | 系统基线：时区、依赖、iptables 白名单、屏蔽 IPv6、BBR |
-| `scripts/install_sui.sh` | 非交互安装 S-UI + ACME 证书 + 改默认密码 |
-| `scripts/deploy_nodes.py` | 创建 4 个入站 + 订阅用户（幂等，自动生成凭据） |
+| `scripts/install_sui.sh` | 非交互安装 S-UI + ACME 证书 + 改默认密码（改完自动回读验证） |
+| `scripts/deploy_nodes.py` | 创建入站 + 订阅用户（幂等；默认 4 个节点，TUIC/SS 可关） |
 | `scripts/verify_nodes.sh` | 端到端验证（15 项检查，明确标注验证不了防火墙） |
-| `scripts/render_report.py` | 生成交付文档 `.md` / `.html`（数据实测回读） |
+| `scripts/render_report.py` | 生成交付文档 `.md` / `.html`（数据实测回读，可选带实测记录） |
+
+> `render_report.py` 会读根目录的 `measured.json`（gitignored）生成「实测记录」一节。
+> 没有这个文件就整节省略 —— 宁可少写一节，也不要编造吞吐数字。
 
 ### 典型执行顺序
 

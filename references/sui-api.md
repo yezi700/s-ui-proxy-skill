@@ -86,8 +86,10 @@ cfg = obj if isinstance(obj, dict) else (payload if "inbounds" in payload else {
 POST /api/save
   object = clients | inbounds | tls | outbounds | endpoints | services | config | settings
   action = new | edit | del
-  data   = <JSON 字符串，或 del 时的裸 id>
+  data   = <JSON 字符串>
 ```
+
+⚠️ `del` 的 `data` 格式**按对象不同而不同**，写错会静默失败，见 §4.5。
 
 ### 4.1 保存客户端
 
@@ -101,10 +103,11 @@ POST /api/save
   "volume": 0,               // 字节，0 = 不限
   "expiry": 0,               // Unix 秒，0 = 不过期
   "config": {
-    "anytls":    {"name": "us", "password": "..."},
-    "vless":     {"name": "us", "uuid": "...", "flow": "xtls-rprx-vision"},
-    "tuic":      {"name": "us", "uuid": "...", "password": "..."},
-    "hysteria2": {"name": "us", "password": "..."}
+    "anytls":        {"name": "us", "password": "..."},
+    "vless":         {"name": "us", "uuid": "...", "flow": "xtls-rprx-vision"},
+    "hysteria2":     {"name": "us", "password": "..."},
+    "shadowsocks16": {"name": "us", "password": "<psk>"}
+    // TUIC 启用时才有： "tuic": {"name": "us", "uuid": "...", "password": "..."}
   }
 }
 ```
@@ -117,8 +120,24 @@ POST /api/save
 3. **`GET /api/clients` 不返回 `config`**。edit 前必须从 DB 补全，
    否则凭据被清空，随后报 `converting NULL to string is unsupported`。
 
-`config` 的键是**协议名**，一个客户端身份可以同时持有多种协议凭据，
-这正是"一条订阅出全部节点"的实现方式 —— 不需要任何合并脚本。
+`config` 的键**大部分**是协议名，但有例外 —— 这是最容易踩的地方：
+
+| 入站类型 | config 的键 | 值 |
+|---|---|---|
+| `anytls` | `anytls` | `{name, password}` |
+| `vless` | `vless` | `{name, uuid, flow}` |
+| `hysteria2` | `hysteria2` | `{name, password}` |
+| `tuic` | `tuic` | `{name, uuid, password}` |
+| `shadowsocks`（2022 系列） | **`shadowsocks16`** | `{name, password}` |
+| `shadowsocks`（老 AEAD） | `shadowsocks` | `{name, password}` |
+
+SS2022 写成 `shadowsocks` 会让 `UpdateInboundsUsers` 里的
+`json_extract(config,'$.shadowsocks16')` 拿到 NULL，报
+`converting NULL to string is unsupported`，**整个核心起不来**（§6.9.1）。
+
+一个客户端身份可以同时持有多种协议凭据，这正是"一条订阅出全部节点"的实现方式 ——
+不需要任何合并脚本。反过来，**删了入站必须同步删这里的键**，否则订阅会继续生成
+死节点（§3.11）。
 
 ### 4.2 保存入站
 
@@ -166,8 +185,9 @@ POST /api/save
 | 用途 | 关键差异 |
 |---|---|
 | 域名证书（AnyTLS / Hysteria2） | 就是上面这样 |
-| TUIC | `server.alpn = ["h3"]`、`client.alpn = ["h3"]`，**必须独立对象** |
+| TUIC（可选） | `server.alpn = ["h3"]`、`client.alpn = ["h3"]`，**必须独立对象** |
 | Reality | `server.reality = {enabled, handshake, private_key, short_id}`，`client.reality = {enabled, public_key, short_id}` |
+| Shadowsocks | **不需要 TLS 对象**，入站 `tls_id` 填 `0` |
 
 Reality 完整结构：
 
@@ -218,16 +238,36 @@ Reality 完整结构：
 | `subRemarkPrefix` | 节点名是否拼 client remark（建议 `false`） |
 | `timeLocation` | 时区，默认 `Asia/Tehran`，改 `Asia/Shanghai` |
 
-### 4.5 删除对象
+### 4.5 删除对象（clients 和 inbounds 格式不同）
 
-`del` 的 `data` 是**裸 id**：
+**clients —— 裸数字 id：**
 
 ```bash
 --data-urlencode "object=clients" --data-urlencode "action=del" --data-urlencode "data=7"
 ```
 
-传 `{"id":7}` 会报 `cannot unmarshal object into Go value of type uint`。
+传 `{"id":7}` 报 `cannot unmarshal object into Go value of type uint`。
 
+**inbounds —— tag 的 JSON 字符串字面量（带引号）：**
+
+```bash
+--data-urlencode "object=inbounds" --data-urlencode "action=del" \
+  --data-urlencode 'data="US-Shadowsocks-2087"'
+```
+
+四种写法在 1.6.7 上逐个试过，只有最后一种真的删：
+
+| 写法 | 结果 |
+|---|---|
+| `data=6` | `json: cannot unmarshal number into Go value of type string` |
+| `data={"id":6}` | `json: cannot unmarshal object into Go value of type string` |
+| `data="6"`（id 的字符串） | **`success:true`，但什么都没删** ← 最坑 |
+| `data="<tag>"` | 真的删掉了 |
+
+最后那种「静默成功」最要命：脚本以为删了，订阅里还挂着，重启后它又活了。
+`sui_api.del_inbound(tag)` 已封装成正确形式，**别传 id**。
+
+删完还要清 `clients.config` 里对应的协议键，否则订阅继续生成死节点（§3.11）。
 删 TLS 对象前先确认没有入站引用它。
 
 ## 五、订阅服务
@@ -263,6 +303,17 @@ Subscription-Userinfo: upload=8832; download=42625; total=0; expire=0
 - 改 `settings` 用 `UPDATE` + `rowcount==0` 再 `INSERT`，不要用 `ON CONFLICT`
 - 改完要 `systemctl restart s-ui`（或至少触发一次保存）
 - 备份：`cp db/s-ui.db /root/s-ui.db.bak.$(date +%Y%m%d-%H%M)`
+- **`addrs` / `out_json` / `options` 是 BLOB 列**，`sqlite3` 取出来是 `bytes`，
+  必须 `.decode()` 再 `json.loads`（否则 `dict(raw)` 报
+  `cannot convert dictionary update sequence element #0 to a sequence`）
+- **`inbounds` 表没有 `listen_port` 列** —— 端口在 `options` 里：
+  `json_extract(options, '$.listen_port')`。而 `/api/inbounds` 返回的 JSON 里
+  `listen_port` 是顶层字段，两处不一样，别混
+- 改端口要改三处：`options.listen_port`、`out_json.server_port`、
+  `addrs[0].server_port`，缺一处监听器不会动（§3.13）
+- **协议专属参数（如 SS 的 `method` / `password`）不在 `options` 里传** ——
+  它们走入站顶层，服务端自己序列化进 `options` 列。传 `{"options": {...}}` 会被拒：
+  `json: unknown field "options"`（§3.10）
 
 ## 七、curl 快速上手
 

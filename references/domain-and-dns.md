@@ -50,7 +50,9 @@ Cloudflare 可选；这里使用它管理 DNS，不需要创建 Workers、Pages 
 使用其他 DNS 提供商时，同样添加 A 记录即可，不必迁移到 Cloudflare。
 同名若已有冲突 CNAME，先核实用途；若已有旧 A，核对后更新，避免同时指向新旧 VPS。
 
-**本仓库的节点域名保持灰云。** 普通橙云面向受支持端口的 HTTP/HTTPS，不能直接代理当前 REALITY TCP、Hysteria2/TUIC UDP 配置。默认面板端口 `46821` 也不在支持列表中。灰云返回 VPS 地址，不会隐藏源站 IP。
+**本仓库的节点域名保持灰云。** 普通橙云只代理受支持端口的 HTTP/HTTPS，无法直接代理当前
+REALITY TCP、Hysteria2 UDP、Shadowsocks TCP/UDP 配置。默认面板端口 `46821` 也不在支持列表中。
+灰云返回 VPS 地址，不会隐藏源站 IP。
 
 [Cloudflare 支持端口与其他协议说明](https://developers.cloudflare.com/fundamentals/reference/network-ports/)
 

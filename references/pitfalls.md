@@ -3,6 +3,40 @@
 > 全部来自实际部署。每条都写清「现象 → 根因 → 修复」，
 > 方便对照排查，而不是让你从头试。
 
+## 症状速查
+
+**别从头读。** 先在下表找到你看到的那一行，再跳过去。
+
+| 你看到的 | 最可能的原因 | 去这里 |
+|---|---|---|
+| 节点能连、能开网页，但吞吐只有几百 KB/s | 明文 QUIC 被限速 | §6.8 |
+| Reality 报 `REALITY authentication failed` | 443 被针对性干扰 | §1.1 |
+| Hysteria2 全部 `context deadline exceeded` | 同上 | §1.1 |
+| 「我改了端口，怎么没生效」 | 只改了 out_json，没改 options | §3.13 |
+| `initialize inbound[4]: missing psk` | SS 入站缺 password | §6.9.2 |
+| `converting NULL to string is unsupported` | client config 缺 `shadowsocks16` | §6.9.1 |
+| 核心起不来、所有端口一起消失 | 同上（SS 配置错会让整核挂掉） | §6.9.1 |
+| 订阅里有个节点永远连不上，但面板里没有 | 删了入站没清 clients.config | §3.11 |
+| `json: unknown field "options"` | 协议参数放错了层级 | §3.10 |
+| `cannot unmarshal number into Go value of type string` | 删入站传了 id | §3.5 |
+| 删除返回 `success:true` 但没删掉 | 传了 id 的字符串形式 | §3.5 |
+| 登录接口 404 | `PANEL_PATH` 为空 | §2.8 |
+| 改密码返回空响应，面板还是 admin/admin | 用了 127.0.0.1，撞 SNI | §2.9 |
+| `tls: unrecognized server name ""` | 同上 | §3.8 |
+| `tls: server did not select an ALPN protocol` | TUIC 与 AnyTLS 共用 TLS 对象 | §4.2 |
+| 面板 API 返回 403 且响应体为空 | 缺 `Origin` 头 | §3.1 |
+| `save: unexpected end of JSON input` | clients 缺 `links:[]` | §3.3 |
+| 连自己刚开的端口超时，但 VPS 上能 curl 通 | 防火墙没放行 | §5.3 |
+| 整个 SSH 断了 / 进程莫名被杀 | `pkill -f` 匹配到自己 | §8.4 |
+| `缺少 paramiko` 但明明装了 | `py` 启动器读了脚本的 `#!` | §8.1 |
+| Clash 里节点数比实际少 | 数法错了（YAML 缩进） | §6.7 |
+| Clash 导入报 `cannot unmarshal !!str` | 填了 base64 那条订阅 | §6.6 |
+| 只有 Reality 能连，其它全挂 | 客户端用的是 Xray 内核 | §6.1 |
+| 偶发 `salt not unique` | 客户端复用 salt，不是服务端问题 | §6.9.6 |
+
+**排查顺序**：先分清是哪一层 —— 服务端在跑？端口通？协议握手成功？
+三层验证见 §7.1，不要一上来就重装面板。
+
 ---
 
 ## §1 端口与封锁
@@ -568,6 +602,114 @@ awk '/^proxies:/{f=1;next} /^[a-zA-Z_-]+:/{f=0} f&&/^    - /{c++} END{print c+0}
 
 ---
 
+### 6.8 TUIC 在部分线路上会被限速到不可用
+
+**症状**：节点能连上、能认证、能打开纯文本页面，但吞吐只有 **0.2~0.4 Mbps**，
+图片和视频基本加载不出来。延迟看起来还正常，所以很容易误判成「客户端配置错」。
+
+**逐项排除**（2026-11 在一台日本 VPS 上做完整套）：
+
+| 检查 | 结果 | 说明 |
+|---|---|---|
+| 换端口 8443 → 2084 | 同样慢 | 不是端口被封 |
+| 换客户端 mihomo → sing-box 1.14.4 官方 | 同样慢 | 不是客户端实现问题 |
+| 服务端日志时间戳 | 连接在同一秒内转发出去 | 服务端没有卡住 |
+| `nstat -az UdpRcvbufErrors` 传输前后差值 | 0 | 不是收包缓冲区打满 |
+| 同一台机器上的 Hysteria2 | 正常，几十 Mbps | 不是线路总带宽不够 |
+
+**结论**：这条路径对**明文 QUIC** 做了限速/整形。Hysteria2 能活下来是因为它默认带
+`salamander` 混淆，把 QUIC 包伪装过；TUIC 的握手特征太明显。
+
+**处置**：别在 TUIC 上耗时间，直接换一个 **TCP 系的轻量协议**。
+Shadowsocks 2022 是最省事的选择（无 TLS 握手、握手往返最少、客户端兼容面广）。
+`deploy_nodes.py` 已经把 TUIC 改成可选、SS 改成默认（`TUIC_PORT` 留空即不部署）。
+
+> 顺带一提：如果某天发现 Hysteria2 也掉了，先把 `obfs` 打开再排查别的。
+
+---
+
+### 6.9 Shadowsocks 2022 的必填项
+
+漏一个核心就直接起不来，而且报错完全不提「SS」。
+
+#### 6.9.1 客户端 config 的键是 `shadowsocks16`，不是 `shadowsocks`
+
+`clients.config` 里 2022 系列要用 `shadowsocks16`：
+
+```json
+{"shadowsocks16": {"name": "jp", "password": "<psk>"}}
+```
+
+写成 `shadowsocks` 的后果：
+
+```
+restartSb: sql: Scan error ... json_extract(clients.config, "$.shadowsocks16"):
+converting NULL to string is unsupported
+```
+
+然后 sing-box 核心**整个挂掉**，所有节点端口一起消失（不只是 SS）。
+排查时容易以为是自己把面板搞崩了。
+
+#### 6.9.2 服务端 `options` 必须有 `password`（psk）
+
+只有 `method` 不够：
+
+```
+initialize inbound[4]: missing psk
+```
+
+psk 要同时写在入站顶层（API 传参）和 `out_json` 里，见 §3.10。
+
+#### 6.9.3 psk 长度由 method 决定
+
+| method | psk 字节数 | base64 长度 |
+|---|---|---|
+| `2022-blake3-aes-128-gcm` | 16 | 24（末尾 `==`） |
+| `2022-blake3-aes-256-gcm` | 32 | 44（末尾 `=`） |
+| `2022-blake3-chacha20-poly1305` | 32 | 44（末尾 `=`） |
+
+必须是**标准 base64（带 `=` 填充）**，不能像别的密码那样用 urlsafe 去填充版。
+长度不对 → `initialize inbound: invalid password`。
+
+#### 6.9.4 客户端里的密码格式是 `psk:psk`
+
+mihomo 的 `ss` 代理，2022 系列要写 `服务器psk:用户psk`。只有一个用户时两边相同：
+
+```yaml
+- name: JP-Shadowsocks-2087
+  type: ss
+  cipher: 2022-blake3-aes-128-gcm
+  password: AAAAAAAAAAAAAAAAAAAAAA==:AAAAAAAAAAAAAAAAAAAAAA==
+```
+
+（上面是两个占位 psk，真实值由部署脚本生成；只有单用户时两边相同。）
+
+只写一个 psk 会认证失败。订阅生成的是正确格式，手写配置时才容易漏。
+
+#### 6.9.5 SS 默认同时监听 tcp 和 udp
+
+sing-box 的 shadowsocks 入站默认开 UDP relay，`ss -lntu` 里会看到
+`tcp *:2087` **和** `udp *:2087` 两个 socket。
+
+如果防火墙只放行了 tcp，UDP 那个 socket 白开着、静默丢包 —— 表现为
+「网页能开，但客户端开 UDP 转发后某些应用不通」。
+**tcp 和 udp 都要放行**（`setup_base.sh` 的 `SS_PORT` 已经两个都写）。
+
+#### 6.9.6 `salt not unique` 不是服务端问题
+
+高并发拨测时服务端日志会出现：
+
+```
+inbound/shadowsocks[...] process connection from x.x.x.x:port:
+shadowsocks: serve TCP from ...: salt not unique
+```
+
+这是**客户端重复使用同一个 salt**（SS2022 的防重放机制触发）。
+16 字节随机 salt 正常不会撞，所以基本是客户端实现的锅。
+偶发几条无所谓；如果频繁出现导致连接失败，换客户端版本或换加密方式，不要改服务端。
+
+---
+
 ## §7 验证方法
 
 ### 7.1 三层验证，缺一不可
@@ -600,117 +742,9 @@ curl -s -x http://127.0.0.1:7899 https://api.ipify.org
 
 ---
 
-## §8 TUIC 在部分线路上会被限速到不可用
+## §8 本机环境与工具链（Windows / Git Bash）
 
-**症状**：节点能连上、能认证、能打开纯文本页面，但吞吐只有 **0.2~0.4 Mbps**，
-图片和视频基本加载不出来。延迟看起来还正常，所以很容易误判成「客户端配置错」。
-
-**逐项排除**（2026-11 在一台日本 VPS 上做完整套）：
-
-| 检查 | 结果 | 说明 |
-|---|---|---|
-| 换端口 8443 → 2084 | 同样慢 | 不是端口被封 |
-| 换客户端 mihomo → sing-box 1.14.4 官方 | 同样慢 | 不是客户端实现问题 |
-| 服务端日志时间戳 | 连接在同一秒内转发出去 | 服务端没有卡住 |
-| `nstat -az UdpRcvbufErrors` 传输前后差值 | 0 | 不是收包缓冲区打满 |
-| 同一台机器上的 Hysteria2 | 正常，几十 Mbps | 不是线路总带宽不够 |
-
-**结论**：这条路径对**明文 QUIC** 做了限速/整形。Hysteria2 能活下来是因为它默认带
-`salamander` 混淆，把 QUIC 包伪装过；TUIC 的握手特征太明显。
-
-**处置**：别在 TUIC 上耗时间，直接换一个 **TCP 系的轻量协议**。
-Shadowsocks 2022 是最省事的选择（无 TLS 握手、握手往返最少、客户端兼容面广）。
-`deploy_nodes.py` 已经把 TUIC 改成可选、SS 改成默认（`TUIC_PORT` 留空即不部署）。
-
-> 顺带一提：如果某天发现 Hysteria2 也掉了，先把 `obfs` 打开再排查别的。
-
----
-
-## §9 Shadowsocks 2022 的三个必填项
-
-漏一个核心就直接起不来，而且报错完全不提「SS」。
-
-### 9.1 客户端 config 的键是 `shadowsocks16`，不是 `shadowsocks`
-
-`clients.config` 里 2022 系列要用 `shadowsocks16`：
-
-```json
-{"shadowsocks16": {"name": "jp", "password": "<psk>"}}
-```
-
-写成 `shadowsocks` 的后果：
-
-```
-restartSb: sql: Scan error ... json_extract(clients.config, "$.shadowsocks16"):
-converting NULL to string is unsupported
-```
-
-然后 sing-box 核心**整个挂掉**，所有节点端口一起消失（不只是 SS）。
-排查时容易以为是自己把面板搞崩了。
-
-### 9.2 服务端 `options` 必须有 `password`（psk）
-
-只有 `method` 不够：
-
-```
-initialize inbound[4]: missing psk
-```
-
-psk 要同时写在入站顶层（API 传参）和 `out_json` 里，见 §3.10。
-
-### 9.3 psk 长度由 method 决定
-
-| method | psk 字节数 | base64 长度 |
-|---|---|---|
-| `2022-blake3-aes-128-gcm` | 16 | 24（末尾 `==`） |
-| `2022-blake3-aes-256-gcm` | 32 | 44（末尾 `=`） |
-| `2022-blake3-chacha20-poly1305` | 32 | 44（末尾 `=`） |
-
-必须是**标准 base64（带 `=` 填充）**，不能像别的密码那样用 urlsafe 去填充版。
-长度不对 → `initialize inbound: invalid password`。
-
-### 9.4 客户端里的密码格式是 `psk:psk`
-
-mihomo 的 `ss` 代理，2022 系列要写 `服务器psk:用户psk`。只有一个用户时两边相同：
-
-```yaml
-- name: JP-Shadowsocks-2087
-  type: ss
-  cipher: 2022-blake3-aes-128-gcm
-  password: AAAAAAAAAAAAAAAAAAAAAA==:AAAAAAAAAAAAAAAAAAAAAA==
-```
-
-（上面是两个占位 psk，真实值由部署脚本生成；只有单用户时两边相同。）
-
-只写一个 psk 会认证失败。订阅生成的是正确格式，手写配置时才容易漏。
-
-### 9.5 SS 默认同时监听 tcp 和 udp
-
-sing-box 的 shadowsocks 入站默认开 UDP relay，`ss -lntu` 里会看到
-`tcp *:2087` **和** `udp *:2087` 两个 socket。
-
-如果防火墙只放行了 tcp，UDP 那个 socket 白开着、静默丢包 —— 表现为
-「网页能开，但客户端开 UDP 转发后某些应用不通」。
-**tcp 和 udp 都要放行**（`setup_base.sh` 的 `SS_PORT` 已经两个都写）。
-
-### 9.6 `salt not unique` 不是服务端问题
-
-高并发拨测时服务端日志会出现：
-
-```
-inbound/shadowsocks[...] process connection from x.x.x.x:port:
-shadowsocks: serve TCP from ...: salt not unique
-```
-
-这是**客户端重复使用同一个 salt**（SS2022 的防重放机制触发）。
-16 字节随机 salt 正常不会撞，所以基本是客户端实现的锅。
-偶发几条无所谓；如果频繁出现导致连接失败，换客户端版本或换加密方式，不要改服务端。
-
----
-
-## §10 在 Windows（Git Bash）上跑这套脚本的工具链坑
-
-### 10.1 `py` 启动器会读脚本的 `#!` 行
+### 8.1 `py` 启动器会读脚本的 `#!` 行
 
 `deploy_nodes.py` 开头是 `#!/usr/bin/env python`，Windows 的 `py.exe` 会照着
 shebang 去找 `python` —— 找到的可能是一个**没装 paramiko** 的解释器，于是：
@@ -728,7 +762,7 @@ shebang 去找 `python` —— 找到的可能是一个**没装 paramiko** 的�
 "C:/Users/<you>/AppData/Local/Programs/Python/Python311/python.exe" scripts/deploy_nodes.py
 ```
 
-### 10.2 没有 `bc`、没有 `/usr/bin/time`
+### 8.2 没有 `bc`、没有 `/usr/bin/time`
 
 Git Bash 里这两个都不存在。计时用 `date +%s.%N` 或直接 Python；
 算术用 `awk`：
@@ -737,7 +771,7 @@ Git Bash 里这两个都不存在。计时用 `date +%s.%N` 或直接 Python；
 awk -v a=1.5 -v b=2 'BEGIN{printf "%.2f\n", a/b}'
 ```
 
-### 10.3 `grep -c $'\r'` 测不出 CRLF
+### 8.3 `grep -c $'\r'` 测不出 CRLF
 
 `grep -c` 数的是**行**，不是字符。要数字节：
 
@@ -745,7 +779,7 @@ awk -v a=1.5 -v b=2 'BEGIN{printf "%.2f\n", a/b}'
 tr -dc '\r' < file | wc -c
 ```
 
-### 10.4 `pkill -f` / `pgrep -f` 会匹配到自己
+### 8.4 `pkill -f` / `pgrep -f` 会匹配到自己
 
 `pkill -f "sleep 180"` 会把自己这条命令也匹配上，**连 SSH 会话一起杀掉**。
 用方括号技巧规避：
@@ -754,7 +788,7 @@ tr -dc '\r' < file | wc -c
 ps -eo pid,args | grep -F "[s]leep 180"
 ```
 
-### 10.5 MSYS 会把 `/path` 自动转成 Windows 路径
+### 8.5 MSYS 会把 `/path` 自动转成 Windows 路径
 
 `curl -d "data=/inbounds/del/4"` 里的 `/inbounds/del/4` 会被改写成
 `D:/.../PortableGit/inbounds/del/4`，请求直接 404。

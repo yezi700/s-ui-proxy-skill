@@ -67,7 +67,7 @@ class TestKeyGen(unittest.TestCase):
 class TestNodeSpecs(unittest.TestCase):
     """默认节点集：AnyTLS / Hysteria2 / Reality / Shadowsocks 2022。
 
-    TUIC 默认关（pitfalls §8），要开得显式给 TUIC_PORT。
+    TUIC 默认关（pitfalls §6.8），要开得显式给 TUIC_PORT。
     node_specs 内部有进程内缓存，所以每个用例都构造不同的 cfg 键值。
     """
 
@@ -330,6 +330,87 @@ class TestSuiApi(unittest.TestCase):
         Dummy().save_settings({"subShowInfo": True, "subPort": 2096})
         self.assertEqual(captured["data"]["subShowInfo"], "true")
         self.assertEqual(captured["data"]["subPort"], "2096")
+
+
+# ---------------------------------------------------------------- 文档一致性
+
+def _md_headings(text):
+    return {h.lstrip("§") for h in re.findall(r"^#{2,4} (§?\d+(?:\.\d+)*)", text, re.M)}
+
+
+class TestDocs(unittest.TestCase):
+    """文档和代码最容易各自漂移 —— 这里把它们钉在一起。
+
+    这两条测试都是被真实事故逼出来的：
+    - 兼容性表曾经在 README 里写「Xray 只认 Reality」，而代码里早就加了 SS
+    - pitfalls 章节重排后 §引用 会集体失效，但没人会去逐个点
+    """
+
+    def _read(self, *parts):
+        with open(os.path.join(ROOT, *parts), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_no_dangling_section_refs(self):
+        """所有 §x.y 引用都必须能在目标文档里找到对应标题。"""
+        pitfalls = self._read("references", "pitfalls.md")
+        have = _md_headings(pitfalls)
+        bad = []
+        for base, dirs, files in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+            for fn in files:
+                if not (fn.endswith((".md", ".py", ".sh", ".example")) or fn == "deploy.env"):
+                    continue
+                path = os.path.join(base, fn)
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+                local = _md_headings(text) if fn.endswith(".md") else set()
+                for m in re.finditer(r"§(\d+(?:\.\d+)*)", text):
+                    ref = m.group(1)
+                    if ref in local or ref in have:
+                        continue
+                    bad.append("%s:%d §%s" % (os.path.relpath(path, ROOT),
+                                              text[:m.start()].count("\n") + 1, ref))
+        self.assertEqual(bad, [], "悬空的 § 引用：" + "; ".join(bad))
+
+    def test_symptom_index_targets_exist(self):
+        """症状速查表里每一行指向的章节都必须真实存在。"""
+        text = self._read("references", "pitfalls.md")
+        start = text.index("## 症状速查")
+        end = text.index("## §1 ")
+        table = text[start:end]
+        have = _md_headings(text)
+        refs = re.findall(r"§(\d+(?:\.\d+)*)", table)
+        self.assertGreaterEqual(len(refs), 15, "症状表行数太少，是不是被删了")
+        missing = [r for r in refs if r not in have]
+        self.assertEqual(missing, [], "症状表指向了不存在的章节：%s" % missing)
+
+    def test_compat_table_matches_code(self):
+        """README 里的兼容性表必须和 render_report.CLIENT_SUPPORT 完全一致。"""
+        text = self._read("README.md")
+        lines = [l.strip() for l in text.splitlines() if l.strip().startswith("|")]
+        header_i = next(i for i, l in enumerate(lines) if "AnyTLS" in l and "Hysteria2" in l)
+        header = [c.strip() for c in lines[header_i].strip("|").split("|")]
+        # 表头协议列 → 内部协议名
+        label2proto = {v[0]: k for k, v in render_report.PROTO_META.items()}
+        cols = [label2proto.get(h) for h in header[1:]]
+        self.assertNotIn(None, cols, "README 表头有 PROTO_META 里没有的协议：%s" % header)
+
+        code = dict(render_report.CLIENT_SUPPORT)
+        rows = 0
+        for line in lines[header_i + 2:]:
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            if len(cells) != len(header):
+                break
+            name, vals = cells[0], cells[1:]
+            match = [k for k in code if name.split("（")[0].split(" ≥")[0][:6] in k]
+            self.assertTrue(match, "README 里的客户端 %r 在 CLIENT_SUPPORT 里找不到" % name)
+            expect = code[match[0]]
+            for proto, got in zip(cols, vals):
+                self.assertEqual(got, expect.get(proto),
+                                 "%s 的 %s：README 写 %s，代码是 %s"
+                                 % (name, proto, got, expect.get(proto)))
+            rows += 1
+        self.assertGreaterEqual(rows, 5, "兼容性表行数异常")
 
 
 # ---------------------------------------------------------------- 脚本静态检查

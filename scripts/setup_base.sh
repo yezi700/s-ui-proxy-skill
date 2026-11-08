@@ -21,7 +21,7 @@ SUB_PORT="${SUB_PORT:-2096}"
 #    换到 2053/2083 立刻恢复。详见 references/pitfalls.md §1。
 ANYTLS_PORT="${ANYTLS_PORT:-8443}"
 # TUIC 留空 = 不开 UDP 端口（本机线路实测 TUIC 被限速到 0.2~0.4 Mbps，
-# 见 references/pitfalls.md §8，默认不再部署，想开就显式给个端口号）
+# 见 references/pitfalls.md §6.8，默认不再部署，想开就显式给个端口号）
 # 注意用的是 ${VAR-默认} 而不是 ${VAR:-默认}：带冒号的写法会把「显式留空」
 # 当成未设置、又填回默认值，那就没法关掉了。
 TUIC_PORT="${TUIC_PORT-}"

@@ -10,7 +10,7 @@
     Shadowsocks 2022  2087/tcp   无 TLS 握手、延迟最低，实测这条线路最快
 
 TUIC 默认**不再部署**：实测被限速到 0.2~0.4 Mbps（换端口、换客户端都一样），
-想开就把 deploy.env 里的 TUIC_PORT 填上，见 references/pitfalls.md §8。
+想开就把 deploy.env 里的 TUIC_PORT 填上，见 references/pitfalls.md §6.8。
 
 用法：
     python scripts/deploy_nodes.py              # 本地跑，自动上传到 VPS 执行
@@ -167,7 +167,7 @@ def node_specs(cfg: dict) -> list:
         raw = cfg.get(key)
         return default if raw is None else int(raw or 0)
 
-    tuic_port = _opt("TUIC_PORT", 0)      # 默认关（§8）
+    tuic_port = _opt("TUIC_PORT", 0)      # 默认关（§6.8）
     ss_port = _opt("SS_PORT", 2087)       # 默认开
 
     specs = [
@@ -206,7 +206,7 @@ def node_specs(cfg: dict) -> list:
         })
 
     if tuic_port:
-        # TUIC 实测在本机线路被限速（§8），默认关掉，填了端口才建
+        # TUIC 实测在本机线路被限速（§6.8），默认关掉，填了端口才建
         specs.append({
             "tag": "%s-TUIC-%d" % (prefix, tuic_port),
             "type": "tuic",
