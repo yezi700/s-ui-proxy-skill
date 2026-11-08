@@ -124,10 +124,10 @@ def _median(xs: list) -> float:
 
 
 def measured_rows(d: dict, m: dict) -> list:
-    """返回 [(tag, 短窗口吞吐中位, 区间, 延迟中位, 区间, 轮次, 持续吞吐)]。
+    """返回 [(tag, 吞吐中位, 吞吐区间, 延迟中位, 延迟区间, 轮次, 持续吞吐中位, 持续区间)]。
 
-    短窗口（6 秒）会被 TCP 慢启动严重低估，只能作参考；
-    `throughput_mbps_sustained_100mb` 才是真实带宽，有就优先展示。
+    `throughput_mbps` 是短窗口（6 秒）数据，会被 TCP 慢启动低估 3~4 倍；
+    `throughput_mbps_sustained_100mb` 是 100MB 整包，可能是标量也可能是列表。
     """
     tp = m.get("throughput_mbps") or {}
     lat = m.get("latency_ms") or {}
@@ -139,12 +139,15 @@ def measured_rows(d: dict, m: dict) -> list:
             continue
         t = tp.get(tag) or []
         l = lat.get(tag) or []
+        sv = sust.get(tag)
+        sv = sv if isinstance(sv, list) else ([sv] if sv else [])
         rows.append((
             tag,
             _median(t), ("%.0f–%.0f" % (min(t), max(t))) if t else "—",
             _median(l), ("%.0f–%.0f" % (min(l), max(l))) if l else "—",
             len(t) or len(l),
-            sust.get(tag),
+            _median(sv) if sv else None,
+            ("%.0f–%.0f" % (min(sv), max(sv))) if len(sv) > 1 else None,
         ))
     return rows
 
@@ -352,13 +355,16 @@ def render_md(d: dict) -> str:
     if rows:
         A(S("实测记录"))
         A("")
-        A("| 节点 | 持续吞吐（100MB 整包） | 短窗口吞吐（6 秒） | 延迟中位数 | 延迟区间 | 轮次 |")
-        A("|---|---|---|---|---|---|")
-        for tag, tpm, tpr, latm, latr, n, sust in rows:
-            A("| %s | %s | %.1f Mbps | %.0f ms | %s ms | %d |"
+        has_short = any(r[1] for r in rows)
+        A("| 节点 | 持续吞吐（100MB） | 延迟中位数 | 延迟区间 |%s 轮次 |"
+          % (" 短窗口（6 秒） |" if has_short else ""))
+        A("|---|---|---|%s---|" % ("---|" if has_short else ""))
+        for tag, tpm, tpr, latm, latr, n, smed, srng in rows:
+            A("| %s | %s | %.0f ms | %s ms |%s %d |"
               % (tag,
-                 ("%.1f Mbps" % sust) if sust else "—",
-                 tpm, latm, latr, n))
+                 ("%.1f Mbps%s" % (smed, "（%s）" % srng if srng else "")) if smed else "—",
+                 latm, latr,
+                 (" %.1f Mbps |" % tpm) if has_short else "", n))
         A("")
         A("测法：%s，目标 `%s`。"
           % (m.get("client") or "真实客户端", m.get("target") or d["domain"]))
@@ -366,15 +372,17 @@ def render_md(d: dict) -> str:
             A("")
             A("> %s" % m["note"])
         A("")
-        A("两条读法：")
+        A("三条读法：")
         A("")
-        A("1. **延迟差异来自连接复用，不是协议快慢。** AnyTLS 和 Hysteria2 在客户端侧"
-          "有连接池，一个请求只付 1 个 RTT；Shadowsocks 没有复用，每次新建 TCP（2 RTT）；"
-          "Reality 还要再做一次 TLS 握手（3 RTT）。实测 612 ÷ 205 ≈ 3、402 ÷ 205 ≈ 2，"
-          "和 RTT 数完全对得上。所以「SS 没握手所以最快」是错的 —— "
-          "省掉的那一跳远不如连接复用值钱。")
-        A("2. **短窗口那一列会低估 3~4 倍**，因为前几秒还在 TCP 慢启动。"
-          "拿它选节点会得出完全相反的结论，只看「持续吞吐」那一列。")
+        A("1. **延迟差异是稳定可复现的，吞吐不是。** 延迟排序三轮完全一致；"
+          "吞吐同一节点三次能差一倍（AnyTLS 72/87/108、Reality 53/80），"
+          "波动大于节点之间的差异 —— **不要按吞吐选节点**。")
+        A("2. **延迟差异来自连接复用，不是协议快慢。** AnyTLS 和 Hysteria2 在客户端侧"
+          "有连接池，一个请求只付 1 个 RTT；Shadowsocks 每次新建 TCP（2 RTT）；"
+          "Reality 还要再做一次 TLS 握手（3 RTT）。实测 616 ÷ 205 ≈ 3、348 ÷ 205 ≈ 1.7，"
+          "和 RTT 数对得上。所以「SS 没握手所以最快」是错的。")
+        A("3. **短窗口那一列会低估 3~4 倍**（前几秒还在 TCP 慢启动）。"
+          "上一版就是被这一列带偏，得出了「三轮第一名各不相同」的错误结论。")
         A("")
         if m.get("removed"):
             A("已下线的节点：")
@@ -596,14 +604,18 @@ def render_html(d: dict) -> str:
     rows = measured_rows(d, m)
     if rows:
         parts.append('<h2>实测记录</h2><div class="card"><table>')
+        has_short = any(r[1] for r in rows)
         parts.append('<tr><th>节点</th><th>持续吞吐<br><small>100MB 整包</small></th>'
-                     '<th>短窗口吞吐<br><small>6 秒，低估</small></th>'
-                     '<th>延迟中位数</th><th>延迟区间</th><th>轮次</th></tr>')
-        for tag, tpm, tpr, latm, latr, n, sust in rows:
-            parts.append('<tr><td>%s</td><td>%s</td><td>%.1f Mbps</td>'
-                         '<td>%.0f ms</td><td>%s ms</td><td>%d</td></tr>'
-                         % (esc(tag), ("%.1f Mbps" % sust) if sust else "—",
-                            tpm, latm, esc(latr), n))
+                     '<th>延迟中位数</th><th>延迟区间</th>%s<th>轮次</th></tr>'
+                     % ('<th>短窗口<br><small>6 秒，低估</small></th>' if has_short else ''))
+        for tag, tpm, tpr, latm, latr, n, smed, srng in rows:
+            parts.append('<tr><td>%s</td><td>%s</td><td>%.0f ms</td>'
+                         '<td>%s ms</td>%s<td>%d</td></tr>'
+                         % (esc(tag),
+                            ("%.1f Mbps%s" % (smed, "<br><small>%s</small>" % esc(srng)
+                                              if srng else "")) if smed else "—",
+                            latm, esc(latr),
+                            ('<td>%.1f Mbps</td>' % tpm) if has_short else '', n))
         parts.append('</table>')
         parts.append('<p style="color:var(--mute);margin:10px 0 0">测法：%s，目标 <code>%s</code></p>'
                      % (esc(m.get("client") or "真实客户端"),
@@ -611,13 +623,16 @@ def render_html(d: dict) -> str:
         if m.get("note"):
             parts.append('<p style="color:var(--mute);margin:6px 0 0">%s</p>' % esc(m["note"]))
         parts.append('</div>')
-        parts.append('<div class="note"><b>延迟差异来自连接复用，不是协议快慢。</b>'
+        parts.append('<div class="note"><b>延迟差异是稳定可复现的，吞吐不是。</b>'
+                     '延迟排序三轮完全一致；吞吐同一节点三次能差一倍'
+                     '（AnyTLS 72/87/108、Reality 53/80），波动大于节点之间的差异 —— '
+                     '<b>不要按吞吐选节点</b>。<br>'
+                     '<b>延迟差异来自连接复用，不是协议快慢。</b>'
                      'AnyTLS 和 Hysteria2 在客户端侧有连接池，一个请求只付 1 个 RTT；'
                      'Shadowsocks 每次新建 TCP（2 RTT）；Reality 还要再做一次 TLS 握手（3 RTT）。'
-                     '实测 612 ÷ 205 ≈ 3、402 ÷ 205 ≈ 2，和 RTT 数完全对得上 —— '
+                     '实测 616 ÷ 205 ≈ 3、348 ÷ 205 ≈ 1.7，和 RTT 数对得上 —— '
                      '所以「SS 没握手所以最快」是错的。<br>'
-                     '<b>另外，短窗口那一列会低估 3~4 倍</b>（TCP 慢启动），'
-                     '拿它选节点会得出相反的结论，只看「持续吞吐」那一列。</div>')
+                     '最右那列是 6 秒窗口，<b>会低估 3~4 倍</b>（TCP 慢启动），只作对照。</div>')
         if m.get("removed"):
             parts.append('<h2>已下线节点</h2><div class="card"><ul>%s</ul></div>'
                          % "".join('<li><code>%s</code> —— %s</li>' % (esc(t), esc(w))

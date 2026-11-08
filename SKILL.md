@@ -17,10 +17,10 @@ metadata:
 | 产物 | 说明 |
 |---|---|
 | S-UI 面板 | 随机路径 + 随机端口 + Let's Encrypt 证书（HTTPS），内嵌 sing-box |
-| 节点 1：AnyTLS | TCP 8443，解决 TLS-in-TLS 指纹，自带连接复用 —— 实测 176ms / 108Mbps，双料第一 |
+| 节点 1：AnyTLS | TCP 8443，解决 TLS-in-TLS 指纹，自带连接复用 —— 实测 207ms，每个请求只付 1 个 RTT |
 | 节点 2：Hysteria2 | UDP 2083，高丢包链路吞吐最强；**58888-60888 端口跳跃默认开**，抗单端口 UDP QoS |
-| 节点 3：VLESS + Reality + Vision | TCP 2053，抗主动探测，不依赖自有域名 —— 但 3 个 RTT、612ms，只作应急 |
-| 节点 4：Shadowsocks 2022 | TCP 2087，客户端兼容面最广；无握手但仍要建 TCP，402ms，别指望它最快 |
+| 节点 3：VLESS + Reality + Vision | TCP 2053，抗主动探测，不依赖自有域名 —— 但 3 个 RTT、616ms，只作应急 |
+| 节点 4：Shadowsocks 2022 | TCP 2087，客户端兼容面最广；无握手但仍要建 TCP，348ms |
 | （可选）TUIC v5 | UDP 8443，`TUIC_PORT` 填了才部署 —— 见下方「TUIC 默认关闭」 |
 | 三条订阅 | 通用 base64 / Clash YAML / sing-box JSON，同一客户端身份天然合并 |
 | 交付文档 | 面板凭据、节点参数、兼容性矩阵、防火墙、运维命令、实测数据 |
@@ -206,13 +206,20 @@ python scripts/ssh_run.py -f scripts/verify_nodes.sh
 DNS、防火墙、证书、协议配置的方法。
 
 ```bash
-# 1. 拉订阅
-curl -s "https://<域名>:2096/<subPath>/<subId>?format=clash" -o sub.yaml
+# 有 mihomo 可执行文件的话，一条命令跑完延迟 + 100MB 持续吞吐
+python scripts/bench_nodes.py \
+    --sub "https://<域名>:2096/<subPath>/<subId>?format=clash" \
+    --mihomo /path/to/mihomo
 
-# 2. 用 mihomo / Clash Verge 加载，逐个节点测出口 IP
+# 只想快速看连通性（不跑吞吐）
+python scripts/bench_nodes.py --sub ... --mihomo ... --size 0
 ```
 
-判据：出口 IP 等于 VPS 公网 IP 即为通过。建议每个节点跑 3 次。
+脚本会把订阅里的每个节点切一遍，输出延迟样本和 100MB 整包吞吐。
+**必须跑满大文件**：6 秒窗口量到的是 TCP 慢启动，会把带宽低估 3~4 倍。
+
+判据：出口 IP 等于 VPS 公网 IP 即为通过。**延迟排序看三次是否一致，
+吞吐只看量级不看排名**（同节点三次能差一倍）。
 
 ### Step 7 · 输出交付文档
 
@@ -264,7 +271,8 @@ python scripts/render_report.py -o .
 14. **不要部署 naive 入站**：S-UI 会把它写进 sing-box JSON 订阅，而官方 sing-box
    客户端没编译 `with_naive_outbound`，遇到 `type: naive` **整份订阅报错**（pitfalls §6.11）。
 15. **测吞吐必须跑满大文件**：6 秒窗口量到的是 TCP 慢启动，会把带宽低估 3~4 倍
-   （20~26 Mbps vs 实际的 67~108 Mbps）。用它选节点会得出完全错误的结论（§1.6）。
+   （20~26 Mbps vs 实际的 53~108 Mbps）。而且吞吐波动大于节点之间的差异，
+   **选节点只看延迟，别看吞吐**（§1.6）。
 16. 涉及删除、覆盖、改端口等破坏性操作前，先向用户说明并取得确认。
 
 ## 排查入口
@@ -310,11 +318,13 @@ references/pitfalls.md  →  开头的「症状速查」表格
 | `scripts/setup_base.sh` | 系统基线：时区、依赖、iptables 白名单、屏蔽 IPv6、BBR |
 | `scripts/install_sui.sh` | 非交互安装 S-UI + ACME 证书 + 改默认密码（改完自动回读验证） |
 | `scripts/deploy_nodes.py` | 创建入站 + 订阅用户（幂等；默认 4 个节点，TUIC/SS 可关） |
-| `scripts/verify_nodes.sh` | 端到端验证（15 项检查，明确标注验证不了防火墙） |
+| `scripts/verify_nodes.sh` | 端到端验证（17 项检查，含端口跳跃规则；明确标注验证不了防火墙） |
+| `scripts/bench_nodes.py` | 本机真机拨测：按订阅逐个节点量延迟 + 100MB 持续吞吐 |
 | `scripts/render_report.py` | 生成交付文档 `.md` / `.html`（数据实测回读，可选带实测记录） |
 
 > `render_report.py` 会读根目录的 `measured.json`（gitignored）生成「实测记录」一节。
 > 没有这个文件就整节省略 —— 宁可少写一节，也不要编造吞吐数字。
+> `measured.json` 里的数字由 `bench_nodes.py` 产出。
 
 ### 典型执行顺序
 
