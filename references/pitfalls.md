@@ -33,6 +33,11 @@
 | Clash 导入报 `cannot unmarshal !!str` | 填了 base64 那条订阅 | §6.6 |
 | 只有 Reality 能连，其它全挂 | 客户端用的是 Xray 内核 | §6.1 |
 | 偶发 `salt not unique` | 客户端复用 salt，不是服务端问题 | §6.9.6 |
+| 只有 SS 不通，delay test 报错、curl 502 | 密码只填了用户 psk，缺 `服务器psk:` 前缀 | §6.9.4 |
+| 某个节点掉到几百 KB/s，想换端口救 | 单端口 UDP 被 QoS | §6.10 |
+| sing-box 订阅整份解析失败 `unknown outbound type` | 面板里有 naive 入站 | §6.11 |
+| 脚本连面板 502，但 curl 能通 | 本机系统代理被 urllib 吃掉了 | §8.6 |
+| 测速结果全是 0.0 Mbps | `-o /dev/null` 在 Windows 上写失败 | §8.7 |
 
 **排查顺序**：先分清是哪一层 —— 服务端在跑？端口通？协议握手成功？
 三层验证见 §7.1，不要一上来就重装面板。
@@ -686,6 +691,19 @@ mihomo 的 `ss` 代理，2022 系列要写 `服务器psk:用户psk`。只有一�
 
 只写一个 psk 会认证失败。订阅生成的是正确格式，手写配置时才容易漏。
 
+**症状很隐蔽**：节点看起来是"通的"（TCP 能连上），但
+`/proxies/<name>/delay` 只回 `An error occurred in the delay test`，
+curl 经它访问返回 **502**，服务端日志里没有任何认证失败记录。
+2026-11-09 实测就踩了这次：直接拿 `clients.config.shadowsocks16.password`
+（那是**用户 psk**，不是完整凭据）去填 mihomo，四个节点里只有 SS 不通。
+正确的完整凭据要从订阅里的 `ss://` 链接解出来：
+
+```bash
+# ss://base64(method:server_psk:user_psk)@host:port
+echo 'MjAyMi1ibGFrZTMtYWVzLTEyOC1nY206WFhYWDpZWFhY' | base64 -d
+# → 2022-blake3-aes-128-gcm:XXXX:YYYY
+```
+
 #### 6.9.5 SS 默认同时监听 tcp 和 udp
 
 sing-box 的 shadowsocks 入站默认开 UDP relay，`ss -lntu` 里会看到
@@ -709,6 +727,90 @@ shadowsocks: serve TCP from ...: salt not unique
 偶发几条无所谓；如果频繁出现导致连接失败，换客户端版本或换加密方式，不要改服务端。
 
 ---
+
+### 6.10 Hysteria2 端口跳跃：几乎零成本，但订阅不会带你配
+
+**为什么值得开**：UDP 被限速时，运营商/机房通常是按**单端口**做 QoS 的。
+TUIC 就是死在 2083 一个端口上（§6.8）。Hy2 如果哪天也掉到几百 KB/s，
+换端口的代价比换协议小得多 —— 前提是你早就把跳跃配好了。
+
+**服务端**（`setup_base.sh` 已包含，变量 `HY2_HOP_RANGE`）：
+
+```bash
+# 把整段 UDP 端口重定向到真正的监听端口
+-A INPUT      -p udp -m udp --dport 58888:60888 -j ACCEPT
+-A PREROUTING -p udp -m udp --dport 58888:60888 -j REDIRECT --to-ports 2083
+```
+
+REDIRECT 是 NAT 表操作，**必须放 nat 表**，写进 filter 表不会报错但完全不生效。
+`netfilter-persistent save` 之后重启也在。
+
+**客户端**（订阅里**没有**这一段，必须手改一次）：
+
+```yaml
+# mihomo / Clash Meta
+- name: JP-Hysteria2
+  type: hysteria2
+  server: jp.example.com
+  ports: 58888-60888        # 注意：是 ports，不是 port
+  hop-interval: 30          # 秒，默认 30
+  password: "******"
+  sni: jp.example.com
+```
+
+```json
+// sing-box
+{ "type": "hysteria2", "server": "jp.example.com",
+  "server_ports": ["58888:60888"], "hop_interval": "30s", "password": "******" }
+```
+
+**实测代价为零**：固定端口 198ms / 78.4 Mbps，跳端口 207ms / 77.4 Mbps，
+差异在噪声内。把 `hop-interval` 压到 5 秒跑完 100MB（11.6s，跨 2 次换端口）
+也没断流 —— QUIC 的连接迁移确实生效了。
+
+**验证方法**：光看 `ss -lunp` 是看不到跳跃端口的（内核在 nat 表里转发，
+不产生新 socket）。要从**客户端**连一次，或者看 conntrack：
+
+```bash
+conntrack -L -p udp --dport 2083 2>/dev/null | head
+```
+
+### 6.11 Naive 能跑，但会毒掉 sing-box 订阅
+
+S-UI 1.6.7 的入站类型里有 `naive`，sing-box 1.13+ 也原生支持，所以**技术上能建**。
+2026-11-09 实测：207ms / 26.8 Mbps（短窗口），性能和 Hy2 持平，伪装性最强
+（走的是真 Chromium 的 HTTP/2 栈）。**但不要部署**，两个原因：
+
+**① 建入站会报 `save: missing users`。**
+S-UI 的入站模型没有 users 字段（`database/model/inbounds.go` 里
+`Options json:"-"`），用户全部从 `clients.config[<type>]` 派生
+（`service/inbounds.go: fetchUsers`）。所以顺序必须是：
+
+```
+1. 先给客户端写 config.naive = {"username": "...", "password": "..."}
+2. 再 POST /api/save，object=inbounds，action=new，
+   额外带一个表单字段 initUsers=<客户端 id>
+3. 最后把新入站 id 追加进 clients.inbounds
+```
+
+少任何一步都失败。注意 naive 的用户字段是 `username`，其他协议是 `name`。
+
+**② 它会污染 sing-box JSON 订阅，导致整份配置解析失败。**
+
+加了 naive 之后，`?format=json` 的 outbounds 里多出一条 `type: naive`：
+
+```json
+["selector","urltest","direct","anytls","hysteria2","vless","shadowsocks","naive"]
+```
+
+而**官方发行的 sing-box 客户端没有编译 `with_naive_outbound`**（这是个 build tag），
+遇到未知 outbound 类型会直接报错 —— 整份订阅废掉，不只是这一个节点不生效。
+Clash 格式不受影响（S-UI 生成 Clash 时会跳过 naive），所以问题只在
+Hiddify / Karing / NekoBox 这类吃 JSON 订阅的客户端上出现，**很难联想到是 naive 干的**。
+
+**结论**：naive 的瓶颈从来不是性能，是客户端。mihomo / sing-box / v2rayN
+都不支持它，只能用 `naive.exe` 或 Chrome 插件。真要当预案，单独起一个
+端口、**不要把客户端关联进去**（不关联就不会进订阅）。
 
 ## §7 验证方法
 
@@ -794,3 +896,43 @@ ps -eo pid,args | grep -F "[s]leep 180"
 `D:/.../PortableGit/inbounds/del/4`，请求直接 404。
 加 `MSYS_NO_PATHCONV=1`，或者干脆把这类调用封进 Python 子命令里
 （本 skill 的 `sui_api.py` 就是 Python 实现，绕开了这个问题）。
+
+### 8.6 本机装了系统代理，`sui_api` 会 502
+
+这台机器上 `HTTPS_PROXY` 是全局设的（Clash Verge 的混合端口，不是 10808）。
+Python 的 `urllib` **默认读环境变量**，于是访问面板时被塞进代理，
+代理不认识这个域名/端口，返回：
+
+```
+urllib.error.URLError: <urlopen error Tunnel connection failed: 502 Bad Gateway>
+```
+
+而 `curl` 加了 `-x` 时不受影响，所以「curl 能通、脚本不通」很容易误判成面板问题。
+
+**修法**：在脚本里显式清掉，别指望 `no_proxy`：
+
+```python
+for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+          "http_proxy", "https_proxy", "all_proxy"):
+    os.environ.pop(k, None)
+```
+
+反向的坑也要注意：**测速时要清掉 `--noproxy '*'`**，否则 curl 会走本机代理，
+量到的是别的线路的带宽（表现为 connect=0.000000s，那是连到 127.0.0.1 了）。
+
+### 8.7 `curl -o /dev/null` 在 Windows 上会被当成文件路径
+
+从 Python `subprocess` 直接调 `curl.exe`（不经过 bash）时，`/dev/null`
+是**字面路径**，Windows 上没有这个文件，curl 返回：
+
+```
+rc 23 (CURLE_WRITE_ERROR)，stdout 里的 %{speed_download} 是 0
+```
+
+表现为「测速全是 0.0 Mbps」但请求其实是通的。用 `os.devnull`
+（Windows 上是 `nul`）代替：
+
+```python
+NULL = os.devnull
+subprocess.run(["curl", "-o", NULL, "-w", "%{speed_download}", url])
+```

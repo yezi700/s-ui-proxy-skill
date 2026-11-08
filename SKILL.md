@@ -4,7 +4,7 @@ description: 在全新 VPS 上部署 S-UI（sing-box 内核）面板与抗封锁
 metadata:
   description_zh: 在 VPS 上部署 S-UI（sing-box）面板与 AnyTLS / Hysteria2 / Reality / Shadowsocks 节点
   description_en: Deploy an S-UI (sing-box) panel with AnyTLS, Hysteria2, VLESS-Reality and Shadowsocks 2022 nodes
-  version: 1.2.0
+  version: 1.3.0
 ---
 
 # S-UI 代理节点部署
@@ -17,10 +17,10 @@ metadata:
 | 产物 | 说明 |
 |---|---|
 | S-UI 面板 | 随机路径 + 随机端口 + Let's Encrypt 证书（HTTPS），内嵌 sing-box |
-| 节点 1：AnyTLS | TCP 8443，解决 TLS-in-TLS 指纹，自带连接复用，日常主力 |
-| 节点 2：Hysteria2 | UDP 2083，高丢包链路吞吐最强，带 salamander 混淆 |
-| 节点 3：VLESS + Reality + Vision | TCP 2053，抗主动探测，可作保底 |
-| 节点 4：Shadowsocks 2022 | TCP 2087，无 TLS 握手、延迟最低，客户端兼容面最广 |
+| 节点 1：AnyTLS | TCP 8443，解决 TLS-in-TLS 指纹，自带连接复用 —— 实测 176ms / 108Mbps，双料第一 |
+| 节点 2：Hysteria2 | UDP 2083，高丢包链路吞吐最强；**58888-60888 端口跳跃默认开**，抗单端口 UDP QoS |
+| 节点 3：VLESS + Reality + Vision | TCP 2053，抗主动探测，不依赖自有域名 —— 但 3 个 RTT、612ms，只作应急 |
+| 节点 4：Shadowsocks 2022 | TCP 2087，客户端兼容面最广；无握手但仍要建 TCP，402ms，别指望它最快 |
 | （可选）TUIC v5 | UDP 8443，`TUIC_PORT` 填了才部署 —— 见下方「TUIC 默认关闭」 |
 | 三条订阅 | 通用 base64 / Clash YAML / sing-box JSON，同一客户端身份天然合并 |
 | 交付文档 | 面板凭据、节点参数、兼容性矩阵、防火墙、运维命令、实测数据 |
@@ -61,14 +61,32 @@ Reality 2053/TCP、Shadowsocks 2087/TCP。详见 `references/pitfalls.md` §1。
 
 换端口（8443 → 2084）、换客户端（mihomo → sing-box 1.14.4 官方）都是同样结果；
 服务端日志显示连接在同一秒内转发出去，`UdpRcvbufErrors` 增量为 0 ——
-**不是端口被封、不是客户端问题、不是服务端卡住**，是这条路径对明文 QUIC 做了限速。
-同一台机器上的 Hysteria2 几十 Mbps，因为它带 `salamander` 混淆。
+**不是端口被封、不是客户端问题、不是服务端卡住**。
 
-所以本 skill 默认**不部署 TUIC**，改用 Shadowsocks 2022 作为 TCP 系补充：
-无 TLS 握手、握手往返最少、客户端兼容面比 AnyTLS 还广（Xray / Surge / QuantumultX 都认）。
+至于为什么同一台机器上的 Hysteria2 能跑 78 Mbps：**不是混淆的功劳** ——
+Hy2 入站的 `options` 里只有 `listen` / `listen_port`，根本没配 `obfs`。
+更可能是 TUIC 的会话/UDP 流模型触发了这条路径的 QoS，机制没有定论。
+**别把「TUIC 慢」简化成「明文 QUIC 都被限速」**，否则排查方向会全错。
+
+所以本 skill 默认**不部署 TUIC**，改用 Shadowsocks 2022 补一个 TCP 系节点：
+客户端兼容面最广（Xray / Surge / QuantumultX 都认）。它的价值是兼容和兜底，
+**不是速度** —— 实测 402ms / 67Mbps，比 AnyTLS 慢一倍多（见 §1.6 实测表）。
 
 用户明确要 TUIC 时：`TUIC_PORT` 填个端口即可，但**先告知上面这个实测结论**，
 别让人装完发现慢再回来排查。详见 `references/pitfalls.md` §6.8。
+
+## 端口跳跃默认开
+
+Hysteria2 的监听端口是固定的 2083，而 UDP 限速通常是**按单端口**做的 ——
+TUIC 就是这么死的。所以 `setup_base.sh` 默认把 **58888-60888/udp**
+REDIRECT 到 2083，真掉速时客户端换个端口就能绕开，比换协议便宜得多。
+
+- 服务端：nat 表 `REDIRECT` + filter 表 `ACCEPT`，`netfilter-persistent save` 持久化
+- 客户端：订阅里**不带**这段，要手动加一次 —— mihomo `ports: 58888-60888`，
+  sing-box `server_ports: ["58888:60888"]`
+- 代价：实测为零（固定端口 198ms/78.4Mbps，跳端口 207ms/77.4Mbps）
+
+细节和验证方法见 `references/pitfalls.md` §6.10。
 
 ## 前置条件
 
@@ -241,7 +259,13 @@ python scripts/render_report.py -o .
    删入站的 `del` 传的是 **tag 字符串**，不是 id（pitfalls §3.5）。
 12. **SS2022 的客户端 config 键是 `shadowsocks16`**，服务端 `options` 必须同时有
    `method` 和 `password`，否则核心整个起不来（pitfalls §6.9）。
-13. 涉及删除、覆盖、改端口等破坏性操作前，先向用户说明并取得确认。
+13. **端口跳跃的客户端配置订阅不会带**：服务端 REDIRECT 一段 UDP 端口只是准备好，
+   客户端还得手动加 `ports`（mihomo）/ `server_ports`（sing-box）才生效（pitfalls §6.10）。
+14. **不要部署 naive 入站**：S-UI 会把它写进 sing-box JSON 订阅，而官方 sing-box
+   客户端没编译 `with_naive_outbound`，遇到 `type: naive` **整份订阅报错**（pitfalls §6.11）。
+15. **测吞吐必须跑满大文件**：6 秒窗口量到的是 TCP 慢启动，会把带宽低估 3~4 倍
+   （20~26 Mbps vs 实际的 67~108 Mbps）。用它选节点会得出完全错误的结论（§1.6）。
+16. 涉及删除、覆盖、改端口等破坏性操作前，先向用户说明并取得确认。
 
 ## 排查入口
 

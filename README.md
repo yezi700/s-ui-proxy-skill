@@ -3,16 +3,51 @@
 在全新 Linux VPS 上一键部署 **S-UI（sing-box 内核）** 面板与四协议抗封锁节点。
 
 ```
-AnyTLS        8443/tcp  TLS-in-TLS 指纹打散 + 连接复用，日常主力
-Hysteria2     2083/udp  激进拥塞控制 + salamander 混淆，高丢包链路吞吐最好
-VLESS+Reality 2053/tcp  借用外部 SNI，抗主动探测，保底
-Shadowsocks22 2087/tcp  无 TLS 握手、延迟最低，客户端兼容面最广
+AnyTLS        8443/tcp  TLS-in-TLS 指纹打散 + 连接复用 —— 176ms / 108Mbps，双料第一
+Hysteria2     2083/udp  激进拥塞控制，高丢包链路吞吐最好；58888-60888 端口跳跃默认开
+VLESS+Reality 2053/tcp  借用外部 SNI，抗主动探测 —— 但 3 个 RTT / 612ms，只作应急
+Shadowsocks22 2087/tcp  客户端兼容面最广；无握手但仍要建 TCP，402ms，别指望它最快
 ```
 
 产出：面板凭据、4 个节点、3 种格式的订阅地址、完整的交付文档。
 
 > TUIC 改成**可选**（`TUIC_PORT` 留空即不部署）：实测在部分线路上被限速到
 > 0.2~0.4 Mbps，换端口、换客户端都一样。详见下方「TUIC 为什么不默认开」。
+
+## 端口跳跃：UDP 掉速时的逃生门
+
+UDP 限速通常按**单端口**做，TUIC 就是这么死的。所以默认把
+`58888-60888/udp` 全部 REDIRECT 到 Hysteria2 的 2083，真掉速时换个端口就绕开。
+
+服务端一条 iptables（`setup_base.sh` 已含），客户端要**手动加一次** ——
+订阅不会带这段：
+
+```yaml
+- name: JP-Hysteria2-2083
+  type: hysteria2
+  ports: 58888-60888      # 注意是 ports（复数）
+  hop-interval: 30
+```
+
+实测代价为零：固定端口 198ms / 78.4 Mbps，跳端口 207ms / 77.4 Mbps；
+把 `hop-interval` 压到 5 秒跑完 100MB（跨 2 次换端口）也没断流。
+
+## 协议实测（2026-11，同一台机器）
+
+| 节点 | 延迟中位 | 持续吞吐 100MB | 短窗口 6 秒 |
+|---|---:|---:|---:|
+| AnyTLS 8443 | **176 ms** | **108.4 Mbps** | 23.0 |
+| Hysteria2 2083 | 198 ms | 78.4 Mbps | 25.3 |
+| Reality 2053 | 612 ms | 80.5 Mbps | 20.7 |
+| Shadowsocks 2087 | 402 ms | 67.0 Mbps | 25.5 |
+
+两个反直觉的结论：
+
+1. **延迟差异来自连接复用，不是协议快慢。** AnyTLS / Hy2 有连接池，一个请求
+   只付 1 个 RTT；SS 每次新建 TCP（2 RTT）；Reality 还要再做一次 TLS 握手（3 RTT）。
+   612 ÷ 205 ≈ 3、402 ÷ 205 ≈ 2，和 RTT 数完全对得上。所以「SS 没握手所以最快」是错的。
+2. **6 秒窗口会把带宽低估 3~4 倍**（TCP 慢启动还没爬满）。拿它选节点会得出
+   完全相反的结论 —— 这也是上一版「三轮第一名各不相同」的真正原因。
 
 ## 为什么全部避开 443
 
@@ -43,11 +78,12 @@ Shadowsocks22 2087/tcp  无 TLS 握手、延迟最低，客户端兼容面最广
 | 换客户端 mihomo → sing-box 1.14.4 官方 | 一样慢 |
 | 服务端日志时间戳 | 连接在同一秒内转发，没卡 |
 | `UdpRcvbufErrors` 增量 | 0，不是缓冲区问题 |
-| 同机 Hysteria2 | 几十 Mbps，正常 |
+| 同机 Hysteria2 | 78 Mbps，正常 |
 
-结论：这条路径对**明文 QUIC** 做了限速；Hysteria2 活着是因为 `salamander` 混淆。
-替代方案选了 Shadowsocks 2022 —— 无 TLS 握手、握手往返最少，Xray / Surge /
-QuantumultX 这些不支持 AnyTLS 的客户端也认它。
+结论：这条路径对 TUIC 做了限速。**注意别归因成「明文 QUIC 都被限速」** ——
+同一台机器的 Hysteria2 根本没配 `obfs`，照样 78 Mbps，所以不是混淆的功劳。
+替代方案选了 Shadowsocks 2022：客户端兼容面最广，Xray / Surge / QuantumultX
+这些不支持 AnyTLS 的客户端也认它（但它 402ms，价值在兼容不在速度）。
 
 ## 特性
 

@@ -21,6 +21,7 @@ ANYTLS_PORT="${ANYTLS_PORT:-8443}"
 TUIC_PORT="${TUIC_PORT-}"           # 留空 = 不检查（默认不部署 TUIC）
 SS_PORT="${SS_PORT-2087}"           # 留空 = 不检查
 HY2_PORT="${HY2_PORT:-2083}"
+HY2_HOP_RANGE="${HY2_HOP_RANGE-58888:60888}"   # 留空 = 不检查端口跳跃
 REALITY_PORT="${REALITY_PORT:-2053}"
 PANEL_USER="${PANEL_USER:-admin}"
 PANEL_PASS="${PANEL_PASS:-}"
@@ -74,6 +75,22 @@ if [ -n "$SS_PORT" ]; then
   # 两个都要在，否则客户端开 UDP 转发会静默失败
   check_listen tcp "$SS_PORT" "Shadowsocks"
   check_listen udp "$SS_PORT" "Shadowsocks"
+fi
+
+# Hysteria2 端口跳跃：nat 表 REDIRECT + filter 表 ACCEPT 缺一不可。
+# 注意跳跃端口**不会出现在 ss -lunp 里**（内核在 nat 表转发，不产生新 socket），
+# 所以只能查规则，不能查监听。
+if [ -n "$HY2_HOP_RANGE" ]; then
+  if iptables -t nat -S PREROUTING 2>/dev/null | grep -q -- "--dport ${HY2_HOP_RANGE}.*--to-ports ${HY2_PORT}"; then
+    ok "Hy2 端口跳跃 nat REDIRECT ${HY2_HOP_RANGE} → ${HY2_PORT}"
+  else
+    bad "Hy2 端口跳跃缺 nat REDIRECT（客户端填了 ports 也连不上）"
+  fi
+  if iptables -S INPUT 2>/dev/null | grep -q -- "--dport ${HY2_HOP_RANGE}"; then
+    ok "Hy2 端口跳跃 filter ACCEPT ${HY2_HOP_RANGE}"
+  else
+    bad "Hy2 端口跳跃缺 filter ACCEPT（包在 INPUT 被 DROP）"
+  fi
 fi
 
 # ---------------------------------------------------------------- 3. 核心配置

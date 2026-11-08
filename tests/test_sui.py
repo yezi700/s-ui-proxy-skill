@@ -351,9 +351,16 @@ class TestDocs(unittest.TestCase):
             return fh.read()
 
     def test_no_dangling_section_refs(self):
-        """所有 §x.y 引用都必须能在目标文档里找到对应标题。"""
-        pitfalls = self._read("references", "pitfalls.md")
-        have = _md_headings(pitfalls)
+        """所有 §x.y 引用都必须能在 references/ 的某个文档里找到对应标题。
+
+        §1.6 这类引用可能指向 protocols-and-clients.md 而不是 pitfalls.md，
+        所以"存在性"按整个 references/ 目录算，再叠加同文件自引用。
+        """
+        have = set()
+        refdir = os.path.join(ROOT, "references")
+        for fn in os.listdir(refdir):
+            if fn.endswith(".md"):
+                have |= _md_headings(self._read("references", fn))
         bad = []
         for base, dirs, files in os.walk(ROOT):
             dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]

@@ -124,9 +124,14 @@ def _median(xs: list) -> float:
 
 
 def measured_rows(d: dict, m: dict) -> list:
-    """返回 [(tag, 吞吐中位数, 吞吐区间, 延迟中位数, 延迟区间)]，按 tag 对齐入站。"""
+    """返回 [(tag, 短窗口吞吐中位, 区间, 延迟中位, 区间, 轮次, 持续吞吐)]。
+
+    短窗口（6 秒）会被 TCP 慢启动严重低估，只能作参考；
+    `throughput_mbps_sustained_100mb` 才是真实带宽，有就优先展示。
+    """
     tp = m.get("throughput_mbps") or {}
     lat = m.get("latency_ms") or {}
+    sust = m.get("throughput_mbps_sustained_100mb") or {}
     rows = []
     for ib in d["inbounds"]:
         tag = ib["tag"]
@@ -139,6 +144,7 @@ def measured_rows(d: dict, m: dict) -> list:
             _median(t), ("%.0f–%.0f" % (min(t), max(t))) if t else "—",
             _median(l), ("%.0f–%.0f" % (min(l), max(l))) if l else "—",
             len(t) or len(l),
+            sust.get(tag),
         ))
     return rows
 
@@ -170,6 +176,7 @@ def collect(cfg: dict) -> dict:
         "sub_clash": sub_base + "?format=clash",
         "sub_json": sub_base + "?format=json",
         "inbounds": [],
+        "hop_range": (cfg.get("HY2_HOP_RANGE") or "").strip(),
         "links": [],
         "tls": api.tls(),
         "server_ip": cfg.get("SERVER_IP") or cfg.get("VPS_HOST") or "",
@@ -300,6 +307,30 @@ def render_md(d: dict) -> str:
         A("⚠️ 拉取订阅失败：%s" % d["links_error"])
         A("")
 
+    if d.get("hop_range") and any(ib["type"] == "hysteria2" for ib in d["inbounds"]):
+        A("### Hysteria2 端口跳跃（订阅里没有，要手动加一次）")
+        A("")
+        A("服务端已经把 `%s/udp` 全部重定向到 Hysteria2 的监听端口，"
+          "但**订阅不会带这段配置**，客户端要自己补：" % d["hop_range"])
+        A("")
+        A("```yaml")
+        A("# mihomo / Clash Meta —— 注意是 ports（复数），不是 port")
+        A("- name: %s" % next((ib["tag"] for ib in d["inbounds"]
+                              if ib["type"] == "hysteria2"), "JP-Hysteria2"))
+        A("  type: hysteria2")
+        A("  ports: %s" % d["hop_range"].replace(":", "-"))
+        A("  hop-interval: 30")
+        A("```")
+        A("")
+        A("```json")
+        A('// sing-box')
+        A('"server_ports": ["%s"], "hop_interval": "30s"' % d["hop_range"])
+        A("```")
+        A("")
+        A("作用：UDP 被按**单端口**限速时换端口就能绕开 —— TUIC 就是死在这上面。"
+          "实测代价为零（固定端口 198ms / 78.4 Mbps，跳端口 207ms / 77.4 Mbps）。")
+        A("")
+
     cols = compat_columns(d)
     A(S("客户端兼容性"))
     A("")
@@ -321,11 +352,13 @@ def render_md(d: dict) -> str:
     if rows:
         A(S("实测记录"))
         A("")
-        A("| 节点 | 吞吐中位数 | 吞吐区间 | 延迟中位数 | 延迟区间 | 采样轮次 |")
+        A("| 节点 | 持续吞吐（100MB 整包） | 短窗口吞吐（6 秒） | 延迟中位数 | 延迟区间 | 轮次 |")
         A("|---|---|---|---|---|---|")
-        for tag, tpm, tpr, latm, latr, n in rows:
-            A("| %s | %.1f Mbps | %s Mbps | %.0f ms | %s ms | %d |"
-              % (tag, tpm, tpr, latm, latr, n))
+        for tag, tpm, tpr, latm, latr, n, sust in rows:
+            A("| %s | %s | %.1f Mbps | %.0f ms | %s ms | %d |"
+              % (tag,
+                 ("%.1f Mbps" % sust) if sust else "—",
+                 tpm, latm, latr, n))
         A("")
         A("测法：%s，目标 `%s`。"
           % (m.get("client") or "真实客户端", m.get("target") or d["domain"]))
@@ -333,10 +366,15 @@ def render_md(d: dict) -> str:
             A("")
             A("> %s" % m["note"])
         A("")
-        A("⚠️ **不要按这张表选节点。** 上表是同一台机器、同一条家宽、连续三轮的结果，"
-          "三轮的第一名各不相同 —— 说明节点之间的差距小于线路本身的抖动。"
-          "真正该做的是：客户端里四个都留着，哪个当下延迟低就用哪个；"
-          "把 **一个 TCP + 一个 UDP** 配成故障切换，比纠结谁最快有用得多。")
+        A("两条读法：")
+        A("")
+        A("1. **延迟差异来自连接复用，不是协议快慢。** AnyTLS 和 Hysteria2 在客户端侧"
+          "有连接池，一个请求只付 1 个 RTT；Shadowsocks 没有复用，每次新建 TCP（2 RTT）；"
+          "Reality 还要再做一次 TLS 握手（3 RTT）。实测 612 ÷ 205 ≈ 3、402 ÷ 205 ≈ 2，"
+          "和 RTT 数完全对得上。所以「SS 没握手所以最快」是错的 —— "
+          "省掉的那一跳远不如连接复用值钱。")
+        A("2. **短窗口那一列会低估 3~4 倍**，因为前几秒还在 TCP 慢启动。"
+          "拿它选节点会得出完全相反的结论，只看「持续吞吐」那一列。")
         A("")
         if m.get("removed"):
             A("已下线的节点：")
@@ -524,6 +562,21 @@ def render_html(d: dict) -> str:
         for ln in d["links"]:
             parts.append('<div class="card copy"><pre><code>%s</code></pre></div>' % esc(ln))
 
+    hy2 = next((ib for ib in d["inbounds"] if ib["type"] == "hysteria2"), None)
+    if d.get("hop_range") and hy2:
+        parts.append('<h2>Hysteria2 端口跳跃（订阅里没有，要手动加一次）</h2>')
+        parts.append('<div class="card"><p>服务端已经把 <code>%s/udp</code> '
+                     '全部重定向到 Hysteria2 的监听端口，但<b>订阅不会带这段配置</b>，'
+                     '客户端要自己补：</p>'
+                     '<pre><code># mihomo / Clash Meta —— 注意是 ports（复数），不是 port\n'
+                     '- name: %s\n  type: hysteria2\n  ports: %s\n  hop-interval: 30\n\n'
+                     '# sing-box\n"server_ports": ["%s"], "hop_interval": "30s"</code></pre>'
+                     '</div>' % (esc(d["hop_range"]), esc(hy2["tag"]),
+                                 esc(d["hop_range"].replace(":", "-")), esc(d["hop_range"])))
+        parts.append('<div class="note">作用：UDP 被按<b>单端口</b>限速时换端口就能绕开 —— '
+                     'TUIC 就是死在这上面。实测代价为零'
+                     '（固定端口 198ms / 78.4 Mbps，跳端口 207ms / 77.4 Mbps）。</div>')
+
     cols = compat_columns(d)
     parts.append('<h2>客户端兼容性</h2><div class="card"><table>')
     parts.append('<tr><th>客户端 / 内核</th>%s<th>备注</th></tr>'
@@ -543,12 +596,14 @@ def render_html(d: dict) -> str:
     rows = measured_rows(d, m)
     if rows:
         parts.append('<h2>实测记录</h2><div class="card"><table>')
-        parts.append('<tr><th>节点</th><th>吞吐中位数</th><th>吞吐区间</th>'
+        parts.append('<tr><th>节点</th><th>持续吞吐<br><small>100MB 整包</small></th>'
+                     '<th>短窗口吞吐<br><small>6 秒，低估</small></th>'
                      '<th>延迟中位数</th><th>延迟区间</th><th>轮次</th></tr>')
-        for tag, tpm, tpr, latm, latr, n in rows:
-            parts.append('<tr><td>%s</td><td>%.1f Mbps</td><td>%s Mbps</td>'
+        for tag, tpm, tpr, latm, latr, n, sust in rows:
+            parts.append('<tr><td>%s</td><td>%s</td><td>%.1f Mbps</td>'
                          '<td>%.0f ms</td><td>%s ms</td><td>%d</td></tr>'
-                         % (esc(tag), tpm, esc(tpr), latm, esc(latr), n))
+                         % (esc(tag), ("%.1f Mbps" % sust) if sust else "—",
+                            tpm, latm, esc(latr), n))
         parts.append('</table>')
         parts.append('<p style="color:var(--mute);margin:10px 0 0">测法：%s，目标 <code>%s</code></p>'
                      % (esc(m.get("client") or "真实客户端"),
@@ -556,11 +611,13 @@ def render_html(d: dict) -> str:
         if m.get("note"):
             parts.append('<p style="color:var(--mute);margin:6px 0 0">%s</p>' % esc(m["note"]))
         parts.append('</div>')
-        parts.append('<div class="note"><b>不要按这张表选节点。</b>'
-                     '同一台机器、同一条家宽、连续三轮，三轮第一名各不相同 —— '
-                     '说明节点之间的差距小于线路本身的抖动。'
-                     '四个都留在客户端里，哪个当下延迟低用哪个；'
-                     '把「一个 TCP + 一个 UDP」配成故障切换，比纠结谁最快有用得多。</div>')
+        parts.append('<div class="note"><b>延迟差异来自连接复用，不是协议快慢。</b>'
+                     'AnyTLS 和 Hysteria2 在客户端侧有连接池，一个请求只付 1 个 RTT；'
+                     'Shadowsocks 每次新建 TCP（2 RTT）；Reality 还要再做一次 TLS 握手（3 RTT）。'
+                     '实测 612 ÷ 205 ≈ 3、402 ÷ 205 ≈ 2，和 RTT 数完全对得上 —— '
+                     '所以「SS 没握手所以最快」是错的。<br>'
+                     '<b>另外，短窗口那一列会低估 3~4 倍</b>（TCP 慢启动），'
+                     '拿它选节点会得出相反的结论，只看「持续吞吐」那一列。</div>')
         if m.get("removed"):
             parts.append('<h2>已下线节点</h2><div class="card"><ul>%s</ul></div>'
                          % "".join('<li><code>%s</code> —— %s</li>' % (esc(t), esc(w))
