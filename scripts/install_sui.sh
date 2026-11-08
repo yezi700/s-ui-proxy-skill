@@ -242,20 +242,50 @@ echo "########## 8. 设置面板密码 ##########"
 # ⚠️ 前端 API 必须带 Origin 头，否则 CSRF 拦成 403 空响应。
 SCHEME="https"
 [ "$CERT_OK" = "1" ] || SCHEME="http"
-BASE="${SCHEME}://127.0.0.1:${PANEL_PORT}/${PANEL_PATH}"
-ORIGIN="${SCHEME}://127.0.0.1:${PANEL_PORT}"
 
-curl -sk -c /tmp/sui.ck -X POST "${BASE}/api/login" \
+# ⚠️ 有证书时**必须用域名**访问，不能用 127.0.0.1：
+#    面板证书和 webDomain 都是按域名配的，用 IP 会被 SNI 校验拒掉，
+#    表现为 changePass 返回空响应（curl -sk 不报错，看起来像"改成功了"）。
+#    用 --resolve 把域名钉到 127.0.0.1，既满足 SNI 又不绕公网。
+if [ "$CERT_OK" = "1" ] && [ -n "${DOMAIN:-}" ]; then
+  HOST="${DOMAIN}"
+  RESOLVE="--resolve ${DOMAIN}:${PANEL_PORT}:127.0.0.1"
+else
+  HOST="127.0.0.1"
+  RESOLVE=""
+fi
+BASE="${SCHEME}://${HOST}:${PANEL_PORT}/${PANEL_PATH}"
+ORIGIN="${SCHEME}://${HOST}:${PANEL_PORT}"
+
+curl -sk ${RESOLVE} -c /tmp/sui.ck -X POST "${BASE}/api/login" \
   -H "Origin: ${ORIGIN}" \
   --data-urlencode "user=admin" --data-urlencode "pass=admin" >/dev/null 2>&1 || true
 
-CHANGE_RESP="$(curl -sk -b /tmp/sui.ck -X POST "${BASE}/api/changePass" \
+CHANGE_RESP="$(curl -sk ${RESOLVE} -b /tmp/sui.ck -X POST "${BASE}/api/changePass" \
   -H "Origin: ${ORIGIN}" \
   --data-urlencode "oldPass=admin" \
   --data-urlencode "newUsername=${PANEL_USER}" \
   --data-urlencode "newPass=${PANEL_PASS}" 2>/dev/null || true)"
 echo "changePass: ${CHANGE_RESP:-<无响应>}"
-rm -f /tmp/sui.ck
+
+# 回读验证：新凭据能登进去、旧凭据登不进，才算真的改成功。
+# 不验证的话，SNI/Origin 任一出问题都会留下 admin/admin 的面板。
+VERIFY_OK=0
+if curl -sk ${RESOLVE} -c /tmp/sui2.ck -X POST "${BASE}/api/login" \
+     -H "Origin: ${ORIGIN}" \
+     --data-urlencode "user=${PANEL_USER}" \
+     --data-urlencode "pass=${PANEL_PASS}" 2>/dev/null | grep -q '"success":true'; then
+  VERIFY_OK=1
+fi
+if [ "$VERIFY_OK" = "1" ]; then
+  echo "✅ 新密码验证通过"
+else
+  echo "❌ 新密码登录失败 —— 面板仍是 admin/admin，请手工处理："
+  echo "   curl -sk ${RESOLVE} -c /tmp/c -X POST '${BASE}/api/login' \\"
+  echo "     -H 'Origin: ${ORIGIN}' -d 'user=admin' -d 'pass=admin'"
+  echo "   （注意必须有 Origin 头，且 HOST 必须是 ${HOST}，不能用 127.0.0.1）"
+fi
+rm -f /tmp/sui.ck /tmp/sui2.ck
 
 # ---------------------------------------------------------------- 落盘
 echo ""

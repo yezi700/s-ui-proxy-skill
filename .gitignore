@@ -4,6 +4,8 @@ deploy.env
 *.env.local
 node-credentials.json
 install-result.env
+# 本机实测数据（只对这台机器/这条线路有意义，写进文档但不进仓库）
+measured.json
 
 # 生成的交付文档（含明文面板密码 / API Token / 节点凭据）
 VPS-*.md

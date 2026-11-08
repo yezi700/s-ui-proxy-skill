@@ -81,11 +81,11 @@ def load_env() -> dict:
         "SUB_PORT", "SUB_PATH", "SUB_ID",
         # 节点端口
         "ANYTLS_PORT", "TUIC_PORT", "HY2_PORT", "REALITY_PORT", "HY2_HOP_RANGE",
-        "ACME_PORT", "SSH_PORT",
+        "SS_PORT", "SS_METHOD", "ACME_PORT", "SSH_PORT",
         # Reality 参数
         "REALITY_SNI", "REALITY_PRIV", "REALITY_PUB", "REALITY_SID", "REALITY_UUID",
         # 节点凭据
-        "ANYTLS_PASSWORD", "TUIC_UUID", "TUIC_PASSWORD", "HY2_PASSWORD",
+        "ANYTLS_PASSWORD", "TUIC_UUID", "TUIC_PASSWORD", "HY2_PASSWORD", "SS_PASSWORD",
         # 系统
         "DISABLE_IPV6", "DNS_SERVERS",
     ]:
@@ -199,6 +199,49 @@ def put_text(cli, text: str, remote_path: str) -> None:
             fh.write(text)
     finally:
         sftp.close()
+
+
+# ---------------------------------------------------------------- 安装结果回填
+
+# install_sui.sh 会随机生成这两个值，本地 deploy.env 是安装前填的、不可能知道
+_INSTALL_KEYS = ("PANEL_PORT", "PANEL_PATH", "PANEL_USER", "PANEL_PASS",
+                 "SUB_PORT", "SUB_PATH", "CERT_DIR", "SUI_VERSION")
+
+
+def fill_from_install_result(cli, cfg: dict, keys=_INSTALL_KEYS) -> list:
+    """把 deploy.env 里留空的关键参数，从 VPS 上的 install-result.env 补齐。
+
+    不补的后果：`PANEL_PATH` 为空 → 拼出来的登录地址是
+    `https://域名:46821/api/login` → **HTTP 404**，报错里完全看不出是路径没填。
+    （这个坑实际踩过一次，排查了半小时。）
+
+    只填空值，不覆盖用户显式填的内容。返回被补上的键名列表。
+    """
+    missing = [k for k in keys if not cfg.get(k)]
+    if not missing:
+        return []
+
+    rc, out, _ = run(cli, "cat /usr/local/s-ui/install-result.env 2>/dev/null || true", timeout=20)
+    if not out.strip():
+        return []
+
+    remote = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        remote[k.strip()] = v.strip()
+
+    filled = []
+    for k in missing:
+        v = remote.get(k)
+        if v:
+            cfg[k] = v
+            filled.append(k)
+    if filled:
+        print("已从 install-result.env 补齐：%s" % ", ".join(filled))
+    return filled
 
 
 # ---------------------------------------------------------------- CLI

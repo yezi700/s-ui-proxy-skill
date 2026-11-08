@@ -1,10 +1,10 @@
 ---
 name: s-ui-proxy-skill
-description: 在全新 VPS 上部署 S-UI（sing-box 内核）面板与抗封锁代理节点（AnyTLS / TUIC v5 / Hysteria2 / VLESS-Reality），覆盖非交互安装、Let's Encrypt 证书、iptables 白名单、BBR 调优、面板 API 建站、三格式订阅与端到端真机验证。当用户要求「搭梯子 / 部署机场节点 / 装 S-UI / 配 AnyTLS、Hysteria2、TUIC、Reality / 照教程部署代理 / 自建科学上网 / 从 3x-ui 迁移到 S-UI」时使用。Deploy a censorship-resistant proxy stack (S-UI panel + sing-box, with AnyTLS, TUIC v5, Hysteria2 and VLESS-Reality) on a fresh VPS with non-interactive install, ACME certs, iptables hardening and end-to-end verification.
+description: 在全新 VPS 上部署 S-UI（sing-box 内核）面板与抗封锁代理节点（AnyTLS / Hysteria2 / VLESS-Reality / Shadowsocks 2022，可选 TUIC），覆盖非交互安装、Let's Encrypt 证书、iptables 白名单、BBR 调优、面板 API 建站、三格式订阅与端到端真机验证。当用户要求「搭梯子 / 部署机场节点 / 装 S-UI / 配 AnyTLS、Hysteria2、Reality、Shadowsocks / 照教程部署代理 / 自建科学上网 / 从 3x-ui 迁移到 S-UI」时使用。Deploy a censorship-resistant proxy stack (S-UI panel + sing-box, with AnyTLS, Hysteria2, VLESS-Reality and Shadowsocks 2022) on a fresh VPS with non-interactive install, ACME certs, iptables hardening and end-to-end verification.
 metadata:
-  description_zh: 在 VPS 上部署 S-UI（sing-box）面板与 AnyTLS / TUIC / Hysteria2 / Reality 节点
-  description_en: Deploy an S-UI (sing-box) panel with AnyTLS, TUIC v5, Hysteria2 and VLESS-Reality nodes
-  version: 1.0.0
+  description_zh: 在 VPS 上部署 S-UI（sing-box）面板与 AnyTLS / Hysteria2 / Reality / Shadowsocks 节点
+  description_en: Deploy an S-UI (sing-box) panel with AnyTLS, Hysteria2, VLESS-Reality and Shadowsocks 2022 nodes
+  version: 1.1.0
 ---
 
 # S-UI 代理节点部署
@@ -18,16 +18,17 @@ metadata:
 |---|---|
 | S-UI 面板 | 随机路径 + 随机端口 + Let's Encrypt 证书（HTTPS），内嵌 sing-box |
 | 节点 1：AnyTLS | TCP 8443，解决 TLS-in-TLS 指纹，自带连接复用，日常主力 |
-| 节点 2：TUIC v5 | UDP 8443，与 AnyTLS 同号，TCP/UDP 独立命名空间 |
-| 节点 3：Hysteria2 | UDP 2083，高丢包链路吞吐最强 |
-| 节点 4：VLESS + Reality + Vision | TCP 2053，抗主动探测，可作保底 |
+| 节点 2：Hysteria2 | UDP 2083，高丢包链路吞吐最强，带 salamander 混淆 |
+| 节点 3：VLESS + Reality + Vision | TCP 2053，抗主动探测，可作保底 |
+| 节点 4：Shadowsocks 2022 | TCP 2087，无 TLS 握手、延迟最低，客户端兼容面最广 |
+| （可选）TUIC v5 | UDP 8443，`TUIC_PORT` 填了才部署 —— 见下方「TUIC 默认关闭」 |
 | 三条订阅 | 通用 base64 / Clash YAML / sing-box JSON，同一客户端身份天然合并 |
 | 交付文档 | 面板凭据、节点参数、兼容性矩阵、防火墙、运维命令、实测数据 |
 
 ## 何时使用
 
 - 用户给了 VPS 凭据，要求搭代理、部署节点、"搭梯子"、自建科学上网
-- 用户要求安装 / 配置 S-UI、sing-box、AnyTLS、Hysteria2、TUIC、Reality
+- 用户要求安装 / 配置 S-UI、sing-box、AnyTLS、Hysteria2、TUIC、Reality、Shadowsocks
 - 用户想把 3x-ui / x-ui 换成 sing-box 系面板
 - 用户提供一份代理部署教程并要求照着做
 - 用户要求为已有面板新增节点、排查节点连不上
@@ -42,16 +43,32 @@ metadata:
 |---|---|
 | VLESS-Reality @ **443**/TCP | `REALITY authentication failed` |
 | Hysteria2 @ **443**/UDP | 全部 `context deadline exceeded` |
-| TUIC @ 8443/UDP | 3/3 通过 |
+| Shadowsocks @ 2087/TCP | 3/3 通过（无 TLS 握手，受 443 干扰影响最小） |
 
 同时 VPS 的 443 端口**未认证握手能正常返回上游真证书**，说明服务端没问题 ——
 是 443 端口被针对性干扰。**把 Reality 换到 2053、Hysteria2 换到 2083，立刻 3/3 全通。**
 
-所以本 skill 的所有默认端口都避开 443：AnyTLS 8443/TCP、TUIC 8443/UDP、
-Hysteria2 2083/UDP、Reality 2053/TCP。详见 `references/pitfalls.md` §1。
+所以本 skill 的所有默认端口都避开 443：AnyTLS 8443/TCP、Hysteria2 2083/UDP、
+Reality 2053/TCP、Shadowsocks 2087/TCP。详见 `references/pitfalls.md` §1。
 
 排查用户"节点突然不能用了"时，**先做这个对照实验**（换端口重试），
 不要一上来就怀疑协议失效或重装面板。
+
+## TUIC 默认关闭
+
+2026-11 在一台日本 VPS 上实测：TUIC 能连上、能认证、延迟也正常，
+但吞吐只有 **0.2~0.4 Mbps**，图片和视频基本打不开。
+
+换端口（8443 → 2084）、换客户端（mihomo → sing-box 1.14.4 官方）都是同样结果；
+服务端日志显示连接在同一秒内转发出去，`UdpRcvbufErrors` 增量为 0 ——
+**不是端口被封、不是客户端问题、不是服务端卡住**，是这条路径对明文 QUIC 做了限速。
+同一台机器上的 Hysteria2 几十 Mbps，因为它带 `salamander` 混淆。
+
+所以本 skill 默认**不部署 TUIC**，改用 Shadowsocks 2022 作为 TCP 系补充：
+无 TLS 握手、握手往返最少、客户端兼容面比 AnyTLS 还广（Xray / Surge / QuantumultX 都认）。
+
+用户明确要 TUIC 时：`TUIC_PORT` 填个端口即可，但**先告知上面这个实测结论**，
+别让人装完发现慢再回来排查。详见 `references/pitfalls.md` §8。
 
 ## 前置条件
 
@@ -140,9 +157,14 @@ python scripts/deploy_nodes.py
 所有 API 调用都在 VPS 本机完成。
 
 创建内容：
-- 3 个 TLS 对象：域名证书（LE）、`tuic-<域名>`（**必须带 alpn h3**）、`reality-<域名>`
-- 4 个入站，全部带 `addrs` 与 `out_json`
+- 2 个 TLS 对象：域名证书（LE）、`reality-<域名>`。
+  只有真的部署 TUIC 时才会额外创建 `tuic-<域名>`（**必须带 alpn h3**）
+- 4 个入站（AnyTLS / Hysteria2 / Reality / Shadowsocks 2022），全部带 `addrs` 与 `out_json`。
+  Shadowsocks 的 `method` / `password` 放在入站**顶层**，不是 `options`（见 pitfalls §3.10）
 - 1 个订阅用户，一个身份绑定全部入站（S-UI 天然一条订阅出全部节点，不需要合并脚本）
+
+节点集是可配的：`TUIC_PORT` / `SS_PORT` 留空就不生成对应节点，
+`setup_base.sh` 的防火墙规则也跟着走 —— 不会出现「建了节点但端口没开」的半成品。
 
 Reality 密钥对用 `openssl genpkey -algorithm X25519` 生成，
 取 PKCS8/SPKI DER 的末 32 字节转 base64url —— 与 Xray 的 `privateKey` 格式一致。
@@ -153,7 +175,8 @@ Reality 密钥对用 `openssl genpkey -algorithm X25519` 生成，
 python scripts/ssh_run.py -f scripts/verify_nodes.sh
 ```
 
-检查 14 项：服务状态、6 个端口监听、4 个入站的 users 注入、TUIC 的 alpn、
+检查 15 项：服务状态、各节点端口监听（SS 的 tcp+udp 两个都查）、
+每个入站的 users 注入、SS 的 method 与 psk 字节数、TUIC 的 alpn（有才查）、
 三格式订阅可读、Clash YAML 含 `udp: true`、订阅响应头、证书有效期。
 
 ⚠️ **这个脚本验证不了防火墙**：VPS 访问自己走 `lo`，不经过 INPUT 链。
@@ -183,22 +206,25 @@ python scripts/render_report.py -o .
 
 **兼容性矩阵必须整张给出**，不能只写一行：
 
-| 客户端 / 内核 | AnyTLS | TUIC | Hysteria2 | VLESS-Reality |
+| 客户端 / 内核 | AnyTLS | Hysteria2 | VLESS-Reality | Shadowsocks |
 |---|:--:|:--:|:--:|:--:|
 | sing-box ≥1.12（Hiddify / Karing / NekoBox） | 是 | 是 | 是 | 是 |
 | mihomo / Clash Meta ≥1.19（Verge Rev / FlClash） | 是 | 是 | 是 | 是 |
-| Xray 系（v2rayN / v2rayNG 默认内核） | 否 | 否 | 否 | 是 |
+| Xray 系（v2rayN / v2rayNG 默认内核） | 否 | 否 | 是 | 是 |
 | Shadowrocket（≥2.2.65） | 是 | 是 | 是 | 是 |
-| Surge | 否 | 否 | 是 | 否 |
-| QuantumultX | 否 | 否 | 否 | 否 |
+| Surge | 否 | 是 | 否 | 是 |
+| QuantumultX | 否 | 否 | 否 | 是 |
+
+（这张表由 `render_report.py` 按**实际入站类型**动态生成，加协议不用改渲染代码。）
 
 只写一半的话，用 Xray 内核的人会以为节点全挂了。详见 `references/pitfalls.md` §6。
 
 ## 关键约束
 
 1. **所有节点避开 443**（见上）。用户坚持要 443 时，先做对照实验说明风险。
-2. **TUIC 必须用独立 TLS 对象且带 `alpn:["h3"]`**，与 AnyTLS 共用会报
-   `tls: server did not select an ALPN protocol`。
+2. **TUIC 默认不部署**：实测在部分线路上被限速到 0.2~0.4 Mbps，换端口换客户端都一样
+   （pitfalls §8）。要开就把 `TUIC_PORT` 填上，且**必须用独立 TLS 对象带 `alpn:["h3"]`**，
+   与 AnyTLS 共用会报 `tls: server did not select an ALPN protocol`。
 3. **保存 clients 必须带 `"links":[]` 和 `inbounds`**，否则报
    `save: unexpected end of JSON input`（Go 侧对 nil 做 Unmarshal，报错完全误导）。
 4. **`GET /api/clients` 不返回 `config`**，edit 前必须从 DB 补全，否则凭据被清空，
@@ -208,10 +234,14 @@ python scripts/render_report.py -o .
 6. **前端 API 必须带 `Origin` 头**，否则 CSRF 拦成 403 且响应体为空。
 7. **访问面板要用域名**（或 `curl --resolve` 钉到 127.0.0.1）。直接用 127.0.0.1 会因
    SNI 不匹配被拒：`tls: unrecognized server name`。
-8. **不要删 `/root/cert/`** —— 面板、订阅、AnyTLS、TUIC、Hysteria2 共用。
+8. **不要删 `/root/cert/`** —— 面板、订阅、AnyTLS、Hysteria2 共用（SS 和 Reality 不用）。
 9. **新增入站 sing-box 会自动热加载**，不需要重启；但改面板自身的端口/路径要重启。
 10. **不要用 `pkill -f` / `pgrep -f` 匹配自己的脚本**（会匹配到脚本自身命令行导致自杀）。
-11. 涉及删除、覆盖、改端口等破坏性操作前，先向用户说明并取得确认。
+11. **删入站要连 `clients.config` 一起清**，否则订阅里继续生成死节点（pitfalls §3.11）。
+   删入站的 `del` 传的是 **tag 字符串**，不是 id（pitfalls §3.5）。
+12. **SS2022 的客户端 config 键是 `shadowsocks16`**，服务端 `options` 必须同时有
+   `method` 和 `password`，否则核心整个起不来（pitfalls §9）。
+13. 涉及删除、覆盖、改端口等破坏性操作前，先向用户说明并取得确认。
 
 ## 参考资料
 
@@ -235,7 +265,7 @@ python scripts/render_report.py -o .
 | `scripts/setup_base.sh` | 系统基线：时区、依赖、iptables 白名单、屏蔽 IPv6、BBR |
 | `scripts/install_sui.sh` | 非交互安装 S-UI + ACME 证书 + 改默认密码 |
 | `scripts/deploy_nodes.py` | 创建 4 个入站 + 订阅用户（幂等，自动生成凭据） |
-| `scripts/verify_nodes.sh` | 端到端验证（14 项检查，明确标注验证不了防火墙） |
+| `scripts/verify_nodes.sh` | 端到端验证（15 项检查，明确标注验证不了防火墙） |
 | `scripts/render_report.py` | 生成交付文档 `.md` / `.html`（数据实测回读） |
 
 ### 典型执行顺序

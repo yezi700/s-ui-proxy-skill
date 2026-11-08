@@ -18,7 +18,8 @@ SUB_PORT="${SUB_PORT:-2096}"
 SUB_PATH="${SUB_PATH:-}"
 SUB_ID="${SUB_ID:-us}"
 ANYTLS_PORT="${ANYTLS_PORT:-8443}"
-TUIC_PORT="${TUIC_PORT:-8443}"
+TUIC_PORT="${TUIC_PORT-}"           # 留空 = 不检查（默认不部署 TUIC）
+SS_PORT="${SS_PORT-2087}"           # 留空 = 不检查
 HY2_PORT="${HY2_PORT:-2083}"
 REALITY_PORT="${REALITY_PORT:-2053}"
 PANEL_USER="${PANEL_USER:-admin}"
@@ -65,9 +66,15 @@ check_listen() {
 check_listen tcp "$PANEL_PORT"   "面板"
 check_listen tcp "$SUB_PORT"     "订阅"
 check_listen tcp "$ANYTLS_PORT"  "AnyTLS"
-check_listen udp "$TUIC_PORT"    "TUIC"
+[ -n "$TUIC_PORT" ] && check_listen udp "$TUIC_PORT" "TUIC"
 check_listen udp "$HY2_PORT"     "Hysteria2"
 check_listen tcp "$REALITY_PORT" "Reality"
+if [ -n "$SS_PORT" ]; then
+  # SS 入站默认带 UDP relay，sing-box 会同时监听 tcp 和 udp；
+  # 两个都要在，否则客户端开 UDP 转发会静默失败
+  check_listen tcp "$SS_PORT" "Shadowsocks"
+  check_listen udp "$SS_PORT" "Shadowsocks"
+fi
 
 # ---------------------------------------------------------------- 3. 核心配置
 echo ""
@@ -114,7 +121,7 @@ for ib in ibs:
 '
 
   printf '%s' "$SB_JSON" | python3 -c '
-import json, sys
+import json, sys, base64
 cfg = json.load(sys.stdin)
 for ib in cfg.get("inbounds") or []:
     if ib.get("type") == "tuic":
@@ -124,6 +131,23 @@ for ib in cfg.get("inbounds") or []:
         else:
             print("  [FAIL] TUIC alpn 不含 h3 → 客户端会报 server did not select an ALPN protocol")
         break
+for ib in cfg.get("inbounds") or []:
+    if ib.get("type") != "shadowsocks":
+        continue
+    m = ib.get("method") or ""
+    p = ib.get("password") or ""
+    # SS2022 的 psk 长度由 method 决定，长度不对 sing-box 起不来（invalid password）
+    want = 16 if "128" in m else (32 if m.startswith("2022-") else 0)
+    try:
+        got = len(base64.b64decode(p))
+    except Exception:
+        got = -1
+    if m.startswith("2022-") and got != want:
+        print("  [FAIL] SS %s psk 解出 %d 字节，应为 %d 字节" % (m, got, want))
+    elif not p:
+        print("  [FAIL] SS 入站缺 psk → initialize inbound: missing psk")
+    else:
+        print("  [PASS] SS method=%s  psk=%d 字节" % (m, got))
 '
 fi
 
@@ -153,7 +177,9 @@ check_sub() {
     clash)
       if grep -q "^proxies:" /tmp/sub.body; then
         local n
-        n="$(grep -cE "^      name: " /tmp/sub.body || true)"
+        # 节点是 proxies 列表项，缩进 4 空格 + "- name:"；
+        # 用 6 空格的 "^      name:" 会把 proxy-groups 里的 Auto 也算进来，数目偏多
+        n="$(grep -cE "^    - name: " /tmp/sub.body || true)"
         ok "${label} 200，Clash YAML，节点 ${n} 个"
         if grep -q "^      udp: true" /tmp/sub.body; then
           ok "${label} 含 udp: true"

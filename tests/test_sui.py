@@ -44,43 +44,96 @@ class TestKeyGen(unittest.TestCase):
         self.assertEqual(len(sid), 16)
         self.assertRegex(sid, r"^[0-9a-f]{16}$")
 
+    def test_ss_key_length_matches_method(self):
+        """SS2022 的 psk 长度由 method 决定，长度不对核心起不来。"""
+        import base64
+        cases = {
+            "2022-blake3-aes-128-gcm": 16,
+            "2022-blake3-aes-256-gcm": 32,
+            "2022-blake3-chacha20-poly1305": 32,
+        }
+        for method, want in cases.items():
+            for _ in range(5):
+                psk = deploy_nodes.gen_ss_key(method)
+                self.assertEqual(len(base64.b64decode(psk)), want,
+                                 "%s 的 psk 应是 %d 字节" % (method, want))
+                # 必须是标准 base64（带 = 填充），不能用 urlsafe
+                self.assertNotIn("-", psk)
+                self.assertNotIn("_", psk)
+
 
 # ---------------------------------------------------------------- 节点声明
 
 class TestNodeSpecs(unittest.TestCase):
+    """默认节点集：AnyTLS / Hysteria2 / Reality / Shadowsocks 2022。
+
+    TUIC 默认关（pitfalls §8），要开得显式给 TUIC_PORT。
+    node_specs 内部有进程内缓存，所以每个用例都构造不同的 cfg 键值。
+    """
+
     def setUp(self):
-        self.cfg = {"DOMAIN": "example.com"}
+        self.cfg = {"DOMAIN": "example.com", "NODE_PREFIX": "T1"}
         self.specs = deploy_nodes.node_specs(self.cfg)
         self.by_type = {s["type"]: s for s in self.specs}
 
-    def test_four_nodes(self):
+    def test_default_four_nodes(self):
         self.assertEqual(len(self.specs), 4)
-        self.assertEqual(set(self.by_type), {"anytls", "tuic", "hysteria2", "vless"})
+        self.assertEqual(set(self.by_type),
+                         {"anytls", "hysteria2", "vless", "shadowsocks"})
+
+    def test_tuic_off_by_default(self):
+        self.assertNotIn("tuic", self.by_type)
+
+    def test_tuic_only_when_port_given(self):
+        specs = deploy_nodes.node_specs(
+            {"DOMAIN": "example.com", "NODE_PREFIX": "T2", "TUIC_PORT": "8443"})
+        self.assertIn("tuic", {s["type"] for s in specs})
+
+    def test_ss_off_when_port_blank(self):
+        """显式留空 = 关掉（区别于键不存在）。"""
+        specs = deploy_nodes.node_specs(
+            {"DOMAIN": "example.com", "NODE_PREFIX": "T3", "SS_PORT": ""})
+        self.assertNotIn("shadowsocks", {s["type"] for s in specs})
 
     def test_no_443(self):
         """443 被针对性干扰，任何节点都不该用 443。"""
         for s in self.specs:
             self.assertNotEqual(s["port"], 443, "%s 不该用 443" % s["tag"])
 
-    def test_ports_unique_per_proto(self):
-        """8443 允许出现两次（AnyTLS 走 TCP、TUIC 走 UDP），其余不得重复。"""
-        tcp = [s["port"] for s in self.specs if s["type"] in ("anytls", "vless")]
+    def test_ports_unique_per_transport(self):
+        """同号端口只允许出现在不同传输层（如 8443/tcp 与 8443/udp）。"""
+        tcp = [s["port"] for s in self.specs
+               if s["type"] in ("anytls", "vless", "shadowsocks")]
         udp = [s["port"] for s in self.specs if s["type"] in ("tuic", "hysteria2")]
         self.assertEqual(len(tcp), len(set(tcp)))
         self.assertEqual(len(udp), len(set(udp)))
 
     def test_tuic_uses_dedicated_tls(self):
         """TUIC 必须用带 alpn h3 的独立 TLS 对象，共用 LE 会报 no ALPN。"""
-        self.assertEqual(self.by_type["tuic"]["tls"], "tuic")
+        specs = {s["type"]: s for s in deploy_nodes.node_specs(
+            {"DOMAIN": "example.com", "NODE_PREFIX": "T4", "TUIC_PORT": "8443"})}
+        self.assertEqual(specs["tuic"]["tls"], "tuic")
+
+    def test_shadowsocks_has_no_tls(self):
+        """SS 自己就是加密协议，不该挂 TLS 对象。"""
+        self.assertIsNone(self.by_type["shadowsocks"]["tls"])
 
     def test_reality_has_vision_flow(self):
         self.assertEqual(self.by_type["vless"]["out_extra"].get("flow"), "xtls-rprx-vision")
 
     def test_ports_overridable(self):
-        cfg = {"DOMAIN": "x.com", "ANYTLS_PORT": "9443", "REALITY_PORT": "2443"}
+        cfg = {"DOMAIN": "x.com", "NODE_PREFIX": "T5",
+               "ANYTLS_PORT": "9443", "REALITY_PORT": "2443"}
         specs = {s["type"]: s for s in deploy_nodes.node_specs(cfg)}
         self.assertEqual(specs["anytls"]["port"], 9443)
         self.assertEqual(specs["vless"]["port"], 2443)
+
+    def test_specs_cached_per_config(self):
+        """同一配置两次调用必须拿到同一把 SS psk，否则入站与客户端凭据对不上。"""
+        cfg = {"DOMAIN": "example.com", "NODE_PREFIX": "T6"}
+        a = [s for s in deploy_nodes.node_specs(cfg) if s["type"] == "shadowsocks"][0]
+        b = [s for s in deploy_nodes.node_specs(cfg) if s["type"] == "shadowsocks"][0]
+        self.assertEqual(a["out_extra"]["password"], b["out_extra"]["password"])
 
 
 # ---------------------------------------------------------------- 配置解析
@@ -149,21 +202,46 @@ class TestLinkParams(unittest.TestCase):
 # ---------------------------------------------------------------- 兼容性表
 
 class TestCompat(unittest.TestCase):
-    def test_table_shape(self):
-        for row in render_report.COMPAT:
-            self.assertEqual(len(row), 6, "每行 6 列：客户端 + 4 协议 + 备注")
+    """兼容性表按实际入站类型动态出列，这里验证「支持/不支持」的判定没错。"""
 
-    def test_xray_row_only_reality(self):
-        """Xray 内核不支持 TUIC / Hysteria2 / AnyTLS —— 这行不能写错。"""
-        row = next(r for r in render_report.COMPAT if "Xray" in r[0])
-        self.assertEqual(row[1], "否")   # AnyTLS
-        self.assertEqual(row[2], "否")   # TUIC
-        self.assertEqual(row[3], "否")   # Hysteria2
-        self.assertEqual(row[4], "是")   # Reality
+    def _sup(self, keyword):
+        return next(sup for name, sup in render_report.CLIENT_SUPPORT if keyword in name)
 
-    def test_singbox_row_all_yes(self):
-        row = next(r for r in render_report.COMPAT if "sing-box" in r[0])
-        self.assertEqual(row[1:5], ("是", "是", "是", "是"))
+    def test_columns_follow_inbounds(self):
+        d = {"inbounds": [
+            {"tag": "a", "type": "anytls"},
+            {"tag": "b", "type": "vless"},
+            {"tag": "c", "type": "shadowsocks"},
+        ]}
+        self.assertEqual(render_report.compat_columns(d), ["anytls", "vless", "shadowsocks"])
+
+    def test_unknown_type_goes_last(self):
+        d = {"inbounds": [{"tag": "x", "type": "wireguard"}, {"tag": "a", "type": "anytls"}]}
+        self.assertEqual(render_report.compat_columns(d), ["anytls", "wireguard"])
+
+    def test_xray_row(self):
+        """Xray 内核只认 Reality 和 Shadowsocks —— 这行不能写错。"""
+        sup = self._sup("Xray")
+        self.assertEqual(sup["anytls"], "否")
+        self.assertEqual(sup["hysteria2"], "否")
+        self.assertEqual(sup["vless"], "是")
+        self.assertEqual(sup["shadowsocks"], "是")
+
+    def test_singbox_all_yes(self):
+        sup = self._sup("sing-box")
+        for proto in ("anytls", "hysteria2", "vless", "shadowsocks"):
+            self.assertEqual(sup[proto], "是", "sing-box 应该支持 %s" % proto)
+
+    def test_every_client_covers_every_known_proto(self):
+        """漏写一个协议会让渲染出 "?" —— 表里不该出现问号。"""
+        for name, sup in render_report.CLIENT_SUPPORT:
+            for proto in render_report.PROTO_META:
+                self.assertIn(proto, sup, "%s 缺 %s 的判定" % (name, proto))
+
+    def test_remark_wording(self):
+        sup = {"anytls": "是", "vless": "是"}
+        self.assertEqual(render_report.compat_remark(["anytls", "vless"], sup), "全部支持")
+        self.assertEqual(render_report.compat_remark(["tuic"], sup), "都不支持")
 
 
 # ---------------------------------------------------------------- API 客户端
@@ -204,7 +282,7 @@ class TestSuiApi(unittest.TestCase):
         self.assertEqual(captured["action"], "edit")
 
     def test_del_client_sends_bare_id(self):
-        """del 的 data 是裸数字，不是 {"id": n}。"""
+        """clients 的 del 的 data 是裸数字，不是 {"id": n}。"""
         captured = {}
 
         class Dummy(sui_api.SuiApi):
@@ -217,6 +295,26 @@ class TestSuiApi(unittest.TestCase):
 
         Dummy().del_client(7)
         self.assertEqual(captured["data"], 7)
+
+    def test_del_inbound_sends_tag_as_json_string(self):
+        """inbounds 的 del 传的是 tag 的 JSON 字符串字面量。
+
+        传 id 数字 → cannot unmarshal number；传 {"id":n} → cannot unmarshal object；
+        传 '"<id>"' → 返回 success 但什么都没删（pitfalls §3.5）。
+        """
+        captured = {}
+
+        class Dummy(sui_api.SuiApi):
+            def __init__(self):
+                pass
+
+            def save(self, obj, action, data):
+                captured["data"] = data
+                return {}
+
+        Dummy().del_inbound("JP-Shadowsocks-2087")
+        # save() 收到的是「已经序列化好的 JSON 文本」，所以这里必须带引号
+        self.assertEqual(captured["data"], '"JP-Shadowsocks-2087"')
 
     def test_settings_bools_become_lowercase_strings(self):
         captured = {}

@@ -217,11 +217,19 @@ class SuiApi:
         return self.save("clients", "edit" if data.get("id") else "new", data)
 
     def del_client(self, cid: int) -> dict:
-        # 注意：del 的 data 是裸数字，不是 {"id": n}
+        # 注意：clients 的 del 要裸数字，不是 {"id": n}
         return self.save("clients", "del", cid)
 
-    def del_inbound(self, iid: int) -> dict:
-        return self.save("inbounds", "del", iid)
+    def del_inbound(self, tag: str) -> dict:
+        """删除入站。传的是 **tag**，不是 id。
+
+        ⚠️ 四种写法里只有一种真的能删（2026-11 在 1.6.7 上逐个试出来的）：
+            save("inbounds", "del", 6)            → json: cannot unmarshal number into Go value of type string
+            save("inbounds", "del", {"id": 6})    → json: cannot unmarshal object into Go value of type string
+            save("inbounds", "del", '"6"')        → success=True，但**什么都没删**（静默无效，最坑）
+            save("inbounds", "del", '"<tag>"')    → 真的删掉了
+        """
+        return self.save("inbounds", "del", json.dumps(str(tag), ensure_ascii=False))
 
     def save_settings(self, kv: dict) -> dict:
         """settings 的值必须全是字符串（布尔也要写成 "true"/"false"）。"""

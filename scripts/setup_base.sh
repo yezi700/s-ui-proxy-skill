@@ -20,15 +20,33 @@ SUB_PORT="${SUB_PORT:-2096}"
 # ⚠️ 全部避开 443：实测 443 被针对性干扰（Reality 认证失败、Hy2 timeout），
 #    换到 2053/2083 立刻恢复。详见 references/pitfalls.md §1。
 ANYTLS_PORT="${ANYTLS_PORT:-8443}"
-TUIC_PORT="${TUIC_PORT:-8443}"
+# TUIC 留空 = 不开 UDP 端口（本机线路实测 TUIC 被限速到 0.2~0.4 Mbps，
+# 见 references/pitfalls.md §8，默认不再部署，想开就显式给个端口号）
+# 注意用的是 ${VAR-默认} 而不是 ${VAR:-默认}：带冒号的写法会把「显式留空」
+# 当成未设置、又填回默认值，那就没法关掉了。
+TUIC_PORT="${TUIC_PORT-}"
 REALITY_PORT="${REALITY_PORT:-2053}"
 HY2_PORT="${HY2_PORT:-2083}"
+# Shadowsocks 端口。⚠️ SS 入站默认带 UDP relay，sing-box 会同时监听 tcp+udp，
+# 只放行 tcp 会让 udp 那个 socket 白开着、静默丢包。留空 = 不部署 SS。
+SS_PORT="${SS_PORT-2087}"
 HY2_HOP_RANGE="${HY2_HOP_RANGE:-58888:60888}"
 ACME_PORT="${ACME_PORT:-80}"
 # 1 = 屏蔽 IPv6，强制代理仅走 IPv4 出口（默认开启）
 DISABLE_IPV6="${DISABLE_IPV6:-1}"
 # 关 IPv6 前要先把 DNS 换成纯 IPv4，否则 IPv6 nameserver 会拖慢/中断解析
 DNS_SERVERS="${DNS_SERVERS:-8.8.8.8 8.8.4.4 1.1.1.1}"
+
+# 可选端口的规则片段 —— 空字符串就什么都不加，避免出现「端口没开却写了规则」
+EXTRA_V4=""
+[ -n "${TUIC_PORT}" ] && EXTRA_V4="${EXTRA_V4}-A INPUT -p udp -m udp --dport ${TUIC_PORT} -j ACCEPT
+"
+if [ -n "${SS_PORT}" ]; then
+  EXTRA_V4="${EXTRA_V4}-A INPUT -p tcp -m tcp --dport ${SS_PORT} -j ACCEPT
+-A INPUT -p udp -m udp --dport ${SS_PORT} -j ACCEPT
+"
+fi
+EXTRA_V4="${EXTRA_V4%$'\n'}"
 
 echo "########## 参数 ##########"
 cat <<EOF
@@ -37,9 +55,10 @@ ACME_PORT       = ${ACME_PORT}
 PANEL_PORT      = ${PANEL_PORT}
 SUB_PORT        = ${SUB_PORT}
 ANYTLS_PORT     = ${ANYTLS_PORT} (tcp)
-TUIC_PORT       = ${TUIC_PORT} (udp)
+TUIC_PORT       = ${TUIC_PORT:-<未启用>} (udp)
 REALITY_PORT    = ${REALITY_PORT} (tcp)
 HY2_PORT        = ${HY2_PORT} (udp)
+SS_PORT         = ${SS_PORT:-<未启用>} (tcp+udp)
 HY2_HOP_RANGE   = ${HY2_HOP_RANGE} (udp)
 DISABLE_IPV6    = ${DISABLE_IPV6} (1=屏蔽 IPv6，仅 IPv4 出口)
 DNS_SERVERS     = ${DNS_SERVERS}
@@ -49,7 +68,7 @@ EOF
 echo ""
 echo "########## 1. 安装基础依赖 ##########"
 apt-get update -y
-# python3：本仓库的远端脚本（deploy_nodes / merge_subscription / verify_nodes /
+# python3：本仓库的远端脚本（deploy_nodes / verify_nodes /
 #   render_report 的采集段）全都用 python3 解析 JSON，最小化系统上可能没有，
 #   所以在这里显式装上。
 # binutils（提供 strings）：可选，只为排查协议字符串方便；
@@ -85,9 +104,9 @@ cat > /etc/iptables/rules.v4 <<EOF
 -A INPUT -p tcp -m tcp --dport ${ACME_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${ANYTLS_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${REALITY_PORT} -j ACCEPT
--A INPUT -p udp -m udp --dport ${TUIC_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_HOP_RANGE} -j ACCEPT
+${EXTRA_V4}
 -A INPUT -p tcp -m tcp --dport ${SUB_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${PANEL_PORT} -j ACCEPT
 -A INPUT -m conntrack --ctstate INVALID -j DROP
@@ -129,9 +148,9 @@ cat > /etc/iptables/rules.v6 <<EOF
 -A INPUT -p tcp -m tcp --dport ${ACME_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${ANYTLS_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${REALITY_PORT} -j ACCEPT
--A INPUT -p udp -m udp --dport ${TUIC_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_HOP_RANGE} -j ACCEPT
+${EXTRA_V4}
 -A INPUT -p tcp -m tcp --dport ${SUB_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${PANEL_PORT} -j ACCEPT
 -A INPUT -m conntrack --ctstate INVALID -j DROP

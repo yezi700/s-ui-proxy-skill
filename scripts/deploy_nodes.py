@@ -2,12 +2,15 @@
 # -*- coding: utf-8 -*-
 """在 S-UI 上创建入站与订阅用户。
 
-四个协议全部避开 443（实测 443 被针对性干扰，详见 references/pitfalls.md §1）：
+默认四个协议，全部避开 443（实测 443 被针对性干扰，详见 references/pitfalls.md §1）：
 
-    AnyTLS + TLS   8443/tcp   解决 TLS-in-TLS 指纹，自带连接复用
-    TUIC v5        8443/udp   与 AnyTLS 同号，TCP/UDP 独立命名空间
-    Hysteria2      2083/udp   高丢包链路吞吐最好
-    VLESS+Reality  2053/tcp   抗主动探测，可作保底
+    AnyTLS + TLS      8443/tcp   解决 TLS-in-TLS 指纹，自带连接复用
+    Hysteria2         2083/udp   高丢包链路吞吐最好（salamander 混淆抗 QUIC 限速）
+    VLESS+Reality     2053/tcp   抗主动探测，可作保底
+    Shadowsocks 2022  2087/tcp   无 TLS 握手、延迟最低，实测这条线路最快
+
+TUIC 默认**不再部署**：实测被限速到 0.2~0.4 Mbps（换端口、换客户端都一样），
+想开就把 deploy.env 里的 TUIC_PORT 填上，见 references/pitfalls.md §8。
 
 用法：
     python scripts/deploy_nodes.py              # 本地跑，自动上传到 VPS 执行
@@ -32,6 +35,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 SUI_DB = "/usr/local/s-ui/db/s-ui.db"
+
+# node_specs() 的进程内缓存，见该函数的 docstring
+_SPEC_CACHE = {}
 
 
 # ---------------------------------------------------------------- 小工具
@@ -66,6 +72,45 @@ def short_id() -> str:
     return os.urandom(8).hex()
 
 
+def gen_ss_key(method: str) -> str:
+    """生成 SS2022 的 psk。
+
+    长度由 method 决定：aes-128-gcm = 16 字节，aes-256-gcm / chacha20-poly1305 = 32 字节。
+    长度不对 sing-box 会直接起不来（日志里是 initialize inbound: invalid password）。
+    必须是标准 base64（带 `=` 填充），不能像别的密码那样用 urlsafe 去填充版。
+    """
+    size = 16 if "128" in method else 32
+    return base64.b64encode(os.urandom(size)).decode()
+
+
+def load_inbound_out(tag: str) -> dict:
+    """从面板 DB 读回某个入站的 out_json（客户端侧配置）。
+
+    GET /api/inbounds 只返回 id/tag/type/port/tls_id/users，不含 out_json，
+    所以要拿 SS 的 method / psk 只能直接读库。
+    ⚠️ out_json 是 BLOB 列，sqlite3 返回的是 bytes，必须 decode 再 json.loads。
+    """
+    import json
+    import sqlite3
+    try:
+        conn = sqlite3.connect("file:%s?mode=ro" % SUI_DB, uri=True)
+        try:
+            row = conn.execute("select out_json from inbounds where tag=?", (tag,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        return {}
+    if not row or not row[0]:
+        return {}
+    raw = row[0]
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    try:
+        return json.loads(raw)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def load_client_config(cid: int) -> dict:
     """从面板 DB 读回某个 client 的 config。
 
@@ -93,37 +138,85 @@ def load_client_config(cid: int) -> dict:
 # ---------------------------------------------------------------- 节点定义
 
 def node_specs(cfg: dict) -> list:
-    """返回四个节点的声明。顺序即创建顺序。"""
-    return [
+    """返回要部署的节点声明。顺序即创建顺序。
+
+    节点名（inbound tag）形如 `<NODE_PREFIX>-AnyTLS-8443`，
+    NODE_PREFIX 取自 deploy.env（默认 US）—— 换地区时只改一处，
+    不要像以前那样把地区写死在脚本里。
+
+    TUIC / SS 都是可选的：deploy.env 里对应端口留空就不生成，
+    这样不会出现「建了节点但防火墙没开端口」的半成品。
+
+    ⚠️ 结果按配置缓存：本函数里会**随机生成** SS 的 psk，
+    而 deploy() 里要调用两次（建入站一次、写客户端凭据一次）。
+    不缓存的话两次拿到两把不同的钥匙，客户端必然连不上。
+    """
+    cache_key = (cfg.get("NODE_PREFIX"), cfg.get("ANYTLS_PORT"), cfg.get("HY2_PORT"),
+                 cfg.get("REALITY_PORT"), cfg.get("TUIC_PORT"), cfg.get("SS_PORT"),
+                 cfg.get("SS_METHOD"), cfg.get("SS_PASSWORD"))
+    if cache_key in _SPEC_CACHE:
+        return _SPEC_CACHE[cache_key]
+
+    prefix = (cfg.get("NODE_PREFIX") or "US").strip().upper() or "US"
+    anytls_port = int(cfg.get("ANYTLS_PORT") or 8443)
+    hy2_port = int(cfg.get("HY2_PORT") or 2083)
+    reality_port = int(cfg.get("REALITY_PORT") or 2053)
+    # 键不存在时用默认值；**显式留空**（TUIC_PORT= / SS_PORT=）表示关掉这个节点。
+    # 所以不能用 `or 默认值` —— 那样空字符串会被当成「没设置」又填回默认。
+    def _opt(key, default):
+        raw = cfg.get(key)
+        return default if raw is None else int(raw or 0)
+
+    tuic_port = _opt("TUIC_PORT", 0)      # 默认关（§8）
+    ss_port = _opt("SS_PORT", 2087)       # 默认开
+
+    specs = [
         {
-            "tag": "US-AnyTLS-8443",
+            "tag": "%s-AnyTLS-%d" % (prefix, anytls_port),
             "type": "anytls",
-            "port": int(cfg.get("ANYTLS_PORT") or 8443),
+            "port": anytls_port,
             "tls": "le",
             "out_extra": {},
         },
         {
-            "tag": "US-TUIC-8443",
-            "type": "tuic",
-            "port": int(cfg.get("TUIC_PORT") or 8443),
-            "tls": "tuic",   # 必须用带 alpn:["h3"] 的独立 TLS 对象
-            "out_extra": {"congestion_control": "bbr", "udp_relay_mode": "native"},
-        },
-        {
-            "tag": "US-Hysteria2-2083",
+            "tag": "%s-Hysteria2-%d" % (prefix, hy2_port),
             "type": "hysteria2",
-            "port": int(cfg.get("HY2_PORT") or 2083),
+            "port": hy2_port,
             "tls": "le",
             "out_extra": {},
         },
         {
-            "tag": "US-Reality-2053",
+            "tag": "%s-Reality-%d" % (prefix, reality_port),
             "type": "vless",
-            "port": int(cfg.get("REALITY_PORT") or 2053),
+            "port": reality_port,
             "tls": "reality",
             "out_extra": {"flow": "xtls-rprx-vision"},
         },
     ]
+
+    if ss_port:
+        method = cfg.get("SS_METHOD") or "2022-blake3-aes-128-gcm"
+        specs.append({
+            "tag": "%s-Shadowsocks-%d" % (prefix, ss_port),
+            "type": "shadowsocks",
+            "port": ss_port,
+            "tls": None,             # SS 自己就是加密协议，不挂 TLS 对象
+            "out_extra": {"method": method,
+                          "password": cfg.get("SS_PASSWORD") or gen_ss_key(method)},
+        })
+
+    if tuic_port:
+        # TUIC 实测在本机线路被限速（§8），默认关掉，填了端口才建
+        specs.append({
+            "tag": "%s-TUIC-%d" % (prefix, tuic_port),
+            "type": "tuic",
+            "port": tuic_port,
+            "tls": "tuic",   # 必须用带 alpn:["h3"] 的独立 TLS 对象
+            "out_extra": {"congestion_control": "bbr", "udp_relay_mode": "native"},
+        })
+
+    _SPEC_CACHE[cache_key] = specs
+    return specs
 
 
 # ---------------------------------------------------------------- 核心
@@ -167,11 +260,14 @@ def deploy(cfg: dict, dry_run: bool = False) -> int:
 
     # 1b. TUIC 专用 —— 必须带 alpn h3，否则客户端报
     #     `tls: server did not select an ALPN protocol`
-    tls_tuic = ensure_tls(
-        "tuic-" + domain,
-        dict(le_server, alpn=["h3"]),
-        dict(le_client, alpn=["h3"]),
-    )
+    #     只有真的建 TUIC 时才创建这个对象，避免留一个没人用的 TLS
+    tls_tuic = None
+    if int(cfg.get("TUIC_PORT") or 0):
+        tls_tuic = ensure_tls(
+            "tuic-" + domain,
+            dict(le_server, alpn=["h3"]),
+            dict(le_client, alpn=["h3"]),
+        )
 
     # 1c. Reality —— 优先复用已有对象里的密钥，避免重复运行时凭据"漂移"
     reality_name = "reality-" + domain
@@ -212,7 +308,7 @@ def deploy(cfg: dict, dry_run: bool = False) -> int:
     }
     tls_reality = ensure_tls(reality_name, reality_server, reality_client)
 
-    tls_map = {"le": tls_le, "tuic": tls_tuic, "reality": tls_reality}
+    tls_map = {"le": tls_le, "tuic": tls_tuic, "reality": tls_reality, None: None}
 
     # ---------------------------------------------------------- 2. 入站
     existing = {i["tag"]: i for i in api.inbounds()}
@@ -224,15 +320,15 @@ def deploy(cfg: dict, dry_run: bool = False) -> int:
             continue
 
         tls_obj = tls_map[spec["tls"]]
-        client_tls = dict(tls_obj.get("client") or {})
-        client_tls.setdefault("enabled", True)
-
         out = {
             "type": spec["type"],
             "server": domain,
             "server_port": spec["port"],
-            "tls": client_tls,
         }
+        if tls_obj:                       # SS 不挂 TLS
+            client_tls = dict(tls_obj.get("client") or {})
+            client_tls.setdefault("enabled", True)
+            out["tls"] = client_tls
         out.update(spec["out_extra"])
 
         inbound = {
@@ -240,10 +336,16 @@ def deploy(cfg: dict, dry_run: bool = False) -> int:
             "tag": tag,
             "listen": "::",
             "listen_port": spec["port"],
-            "tls_id": tls_obj["id"],
+            "tls_id": tls_obj["id"] if tls_obj else 0,
             "addrs": [{"server": domain, "server_port": spec["port"], "remark": ""}],
             "out_json": out,
         }
+        # ⚠️ SS 的 method / password 必须放在入站**顶层**，
+        #    面板服务端会自己把它们塞进 DB 的 options 列。
+        #    传 {"options": {...}} 会直接被拒：json: unknown field "options"。
+        if spec["type"] == "shadowsocks":
+            inbound["method"] = spec["out_extra"]["method"]
+            inbound["password"] = spec["out_extra"]["password"]
 
         if dry_run:
             print("[inbound] 将创建 %s (%s/%s)" % (tag, spec["type"], spec["port"]))
@@ -256,22 +358,42 @@ def deploy(cfg: dict, dry_run: bool = False) -> int:
     ib_ids = [i["id"] for i in api.inbounds() if i["id"] > 0]
     me = next((c for c in api.clients() if c["name"] == sub_id), None)
 
+    specs = node_specs(cfg)
+
     config = {
         "anytls": {"name": sub_id, "password": cfg.get("ANYTLS_PASSWORD") or gen_password()},
         "vless": {"name": sub_id,
                   "uuid": cfg.get("REALITY_UUID") or str(uuidlib.uuid4()),
                   "flow": "xtls-rprx-vision"},
-        "tuic": {"name": sub_id,
-                 "uuid": cfg.get("TUIC_UUID") or str(uuidlib.uuid4()),
-                 "password": cfg.get("TUIC_PASSWORD") or gen_password()},
         "hysteria2": {"name": sub_id, "password": cfg.get("HY2_PASSWORD") or gen_password()},
     }
+
+    ss_spec = next((s for s in specs if s["type"] == "shadowsocks"), None)
+    if ss_spec:
+        method = ss_spec["out_extra"]["method"]
+        psk = ss_spec["out_extra"]["password"]
+        # 入站已存在时以服务端实际存下来的为准，否则重跑脚本会让客户端 psk 漂移
+        live_ss = load_inbound_out(ss_spec["tag"])
+        if live_ss:
+            method = live_ss.get("method") or method
+            psk = live_ss.get("password") or psk
+        # ⚠️ SS2022 的 client config key 是 `shadowsocks16`，不是 `shadowsocks`。
+        #    写成 shadowsocks 会让 UpdateInboundsUsers 里
+        #    json_extract(config,'$.shadowsocks16') 拿到 NULL，报
+        #    "converting NULL to string is unsupported"，整个核心直接起不来。
+        key = "shadowsocks16" if str(method).startswith("2022-") else "shadowsocks"
+        config[key] = {"name": sub_id, "password": psk}
+
+    if any(s["type"] == "tuic" for s in specs):
+        config["tuic"] = {"name": sub_id,
+                          "uuid": cfg.get("TUIC_UUID") or str(uuidlib.uuid4()),
+                          "password": cfg.get("TUIC_PASSWORD") or gen_password()}
 
     if me is None:
         payload = {
             "enable": True,
             "name": sub_id,
-            "remark": "",          # 留空：节点名直接用 inbound tag，避免 "US-US-xxx"
+            "remark": "",          # 留空：节点名直接用 inbound tag，避免 "JP-JP-xxx"
             "desc": "", "group": "",
             "inbounds": ib_ids,
             "links": [],           # ⚠️ 必须显式给，见 sui_api.save_client
@@ -345,11 +467,13 @@ def verify_core(api) -> None:
 
 def run_remote(cfg: dict, argv: list) -> int:
     """本地模式：把自己上传到 VPS，用 --local 执行。"""
-    from ssh_run import get_client, put_text, run, env_prefix
+    from ssh_run import get_client, put_text, run, env_prefix, fill_from_install_result
 
     cli = get_client(cfg)
     try:
         remote_dir = "/root/.sui-skill"
+        # deploy.env 里 PANEL_PATH / SUB_PATH 留空时，从 VPS 的 install-result.env 补上
+        fill_from_install_result(cli, cfg)
         run(cli, "mkdir -p " + remote_dir, timeout=20)
         for name in ("deploy_nodes.py", "sui_api.py", "ssh_run.py"):
             with open(os.path.join(HERE, name), "r", encoding="utf-8", newline="\n") as fh:

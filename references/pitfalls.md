@@ -147,6 +147,48 @@ S-UI 的节点名规则是 `<client remark><inbound tag><addr remark>`。
 `/usr/local/s-ui/db/` 是数据目录，升级时只替换 `sui` 二进制即可。
 升级前先 `cp db/s-ui.db /root/s-ui.db.bak.$(date +%Y%m%d-%H%M)`。
 
+### 2.8 `webPath` / `subPath` 是安装时随机生成的，本地配不出来
+
+`install_sui.sh` 会随机生成这两个路径并写进 `/usr/local/s-ui/install-result.env`。
+但 `deploy.env` 是**安装之前**填的，不可能知道它们 —— 留空的话：
+
+```
+SuiError: HTTP 404            ← 登录接口
+```
+
+因为拼出来的地址是 `https://域名:46821/api/login`，少了 `/<webPath>` 这一段。
+报错里完全看不出是路径没填。
+
+**已经修好**：`ssh_run.fill_from_install_result()` 会在 `deploy_nodes.py` /
+`render_report.py` 建立 SSH 连接后，把 `deploy.env` 里留空的关键参数从
+`install-result.env` 读回来（只补空值，不覆盖你显式填的）。
+
+### 2.9 改面板密码必须用域名，不能用 127.0.0.1
+
+有证书时面板的 `webDomain` 和证书 CN 都是域名，用 `https://127.0.0.1:<端口>` 访问会被
+SNI 校验拒掉：
+
+```
+http: TLS handshake error: tls: unrecognized server name ""
+```
+
+`curl -sk` **不报错**，`changePass` 返回空字符串 —— 脚本以为改完了，
+实际面板还是 `admin/admin`。这是最危险的一种失败：静默、且留下默认口令。
+
+**正确做法**：域名 + `--resolve` 钉到本机（满足 SNI，又不绕公网）：
+
+```bash
+curl -sk --resolve <域名>:<面板端口>:127.0.0.1 \
+  -H "Origin: https://<域名>:<面板端口>" \
+  -X POST "https://<域名>:<面板端口>/<webPath>/api/changePass" \
+  --data-urlencode "oldPass=admin" \
+  --data-urlencode "newUsername=admin" \
+  --data-urlencode "newPass=<新密码>"
+```
+
+改完**必须回读验证**（新密码能登进去），别信空响应。
+`install_sui.sh` 现在会自动验证，失败时打红字并给出补救命令。
+
 ---
 
 ## §3 面板 API
@@ -223,14 +265,30 @@ conn = sqlite3.connect("file:/usr/local/s-ui/db/s-ui.db?mode=ro", uri=True)
 row = conn.execute("select config from clients where id=?", (cid,)).fetchone()
 ```
 
-### 3.5 删除对象传裸 id
+### 3.5 删除对象：clients 传裸 id，inbounds 传 **tag 字符串**
 
-`del` 的 data 是裸数字，不是 `{"id": n}`：
+两套对象的 `del` 格式**不一样**，而且写错的报错会误导人。
+
+**clients** —— 裸数字：
 
 ```bash
 --data-urlencode "data=7"          # 对
 --data-urlencode 'data={"id":7}'   # 错：cannot unmarshal object into Go value of type uint
 ```
+
+**inbounds** —— 必须是 `tag` 的 **JSON 字符串字面量**（带引号）。在 1.6.7 上逐个试过：
+
+| 写法 | 结果 |
+|---|---|
+| `data=6`（数字） | `json: cannot unmarshal number into Go value of type string` |
+| `data={"id":6}` | `json: cannot unmarshal object into Go value of type string` |
+| `data="6"`（id 的字符串） | **返回 `success:true`，但什么都没删** ← 最坑 |
+| `data="JP-Shadowsocks-2087"`（tag） | 真的删掉了 |
+
+最后一行那种「静默成功」最要命：脚本以为删了，订阅里还挂着那个节点，重启后它又活了。
+`sui_api.del_inbound(tag)` 已经封装成正确形式；**别传 id**。
+
+删完还要看 §3.10 —— 入站删了，客户端 config 里的协议条目不会自动消失。
 
 ### 3.6 settings 的值全是字符串
 
@@ -274,6 +332,84 @@ priv = base64.urlsafe_b64encode(priv_der[-32:]).decode().rstrip("=")  # 43 字�
 
 生成的 43 字符私钥与 Xray 的 `privateKey` 格式完全一致。
 
+### 3.10 协议专属参数放在入站**顶层**，不是 `options`
+
+S-UI 的 `inbounds` 表里有一列 `options`，所以很容易以为 POST 时也该传 `options`。
+**不行**：
+
+```
+save: options: json: unknown field "options"
+```
+
+服务端只接受它认识的顶层字段，然后自己把它们序列化进 `options` 列。SS2022 要这样传：
+
+```json
+{
+  "type": "shadowsocks", "tag": "JP-Shadowsocks-2087",
+  "listen": "::", "listen_port": 2087, "tls_id": 0,
+  "addrs": [{"server": "<域名>", "server_port": 2087, "remark": ""}],
+  "out_json": {"type": "shadowsocks", "tag": "...", "server": "...",
+               "server_port": 2087, "method": "2022-blake3-aes-128-gcm",
+               "password": "<psk>"},
+  "method": "2022-blake3-aes-128-gcm",
+  "password": "<psk>"
+}
+```
+
+落库后 `options` 列会变成 `{"listen":"::","listen_port":2087,"method":...,"password":...}`。
+`tls_id` 用 `0`（SS 自己就是加密协议，不挂 TLS 对象）。
+
+### 3.11 删了入站，订阅里还挂着一个死节点
+
+`clients.config` 是**按协议**存的键值对（`anytls` / `vless` / `hysteria2` / `tuic` /
+`shadowsocks16` …），和入站表没有外键关系。删掉 TUIC 入站后：
+
+- `/api/inbounds` 里没有 TUIC 了 ✅
+- 但订阅的三种格式里**都还在生成 `tuic://` 链接** ❌
+
+用户导进去就多一个永远连不上的节点。所以删入站的脚本必须同时清 `clients.config`：
+
+```python
+alive = {i["type"] for i in api.inbounds()}
+KEY2TYPE = {"shadowsocks16": "shadowsocks", "shadowsocks": "shadowsocks", ...}
+for k in [k for k in conf if KEY2TYPE.get(k) not in alive]:
+    del conf[k]
+api.save_client({**me, "config": conf, "links": me.get("links") or []})
+```
+
+⚠️ 改完要回读订阅确认，别信 `success:true`（见 §3.5 的静默成功）。
+
+### 3.12 `options` / `out_json` / `addrs` 是 BLOB 列
+
+`sqlite3` 取出来是 `bytes`，直接 `json.loads` 会报
+`TypeError: the JSON object must be str, bytes or bytearray` —— 其实是能吃的，
+真正的坑是 `dict(raw)` 报
+`cannot convert dictionary update sequence element #0 to a sequence`。
+
+统一先 `.decode()`：
+
+```python
+raw = row[0]
+if isinstance(raw, bytes):
+    raw = raw.decode("utf-8", "replace")
+opts = json.loads(raw)
+```
+
+另外 **`inbounds` 表没有 `listen_port` 列**，端口在 `options` 里：
+`json_extract(options, '$.listen_port')`。而 `/api/inbounds` 返回的 JSON 里
+`listen_port` 是顶层字段 —— 两处不一样，别混。
+
+### 3.13 改端口要改三处
+
+只改 `out_json.server_port` 和 `addrs[].server_port`，监听器**不会动**，还留在老端口上。
+因为真正的 `listen_port` 在 `options` 列里。三处都要写：
+
+1. `options.listen_port`
+2. `out_json.server_port`
+3. `addrs[0].server_port`
+
+改完 `restartSb`（或重启 s-ui）才会生效。
+
 ---
 
 ## §4 证书
@@ -281,7 +417,9 @@ priv = base64.urlsafe_b64encode(priv_der[-32:]).decode().rstrip("=")  # 43 字�
 ### 4.1 一份证书服务多个组件
 
 `/root/cert/<域名>/{fullchain.pem,privkey.pem}` 同时被面板、订阅、AnyTLS、
-TUIC、Hysteria2 引用。**删掉会同时挂掉五个地方。**
+Hysteria2 引用。**删掉会同时挂掉这几处。**
+
+（Shadowsocks 和 VLESS-Reality 不用它：前者自己就是加密协议，后者靠 Reality 借用外部 SNI。）
 
 ### 4.2 TUIC 需要独立的 TLS 对象
 
@@ -435,3 +573,166 @@ curl -s -x http://127.0.0.1:7899 https://api.ipify.org
 - 订阅生成的 YAML **本身已含 `rules` 段**，不要再追加第二个 `rules:`（重复 key 报错）
 - `tun.enable: true` 在 Windows 非管理员下会失败，本地测试时改成 `false`
 - `dns.enable: true` + `fake-ip` 在没有 tun 的情况下会干扰解析，测试时关掉
+
+---
+
+## §8 TUIC 在部分线路上会被限速到不可用
+
+**症状**：节点能连上、能认证、能打开纯文本页面，但吞吐只有 **0.2~0.4 Mbps**，
+图片和视频基本加载不出来。延迟看起来还正常，所以很容易误判成「客户端配置错」。
+
+**逐项排除**（2026-11 在一台日本 VPS 上做完整套）：
+
+| 检查 | 结果 | 说明 |
+|---|---|---|
+| 换端口 8443 → 2084 | 同样慢 | 不是端口被封 |
+| 换客户端 mihomo → sing-box 1.14.4 官方 | 同样慢 | 不是客户端实现问题 |
+| 服务端日志时间戳 | 连接在同一秒内转发出去 | 服务端没有卡住 |
+| `nstat -az UdpRcvbufErrors` 传输前后差值 | 0 | 不是收包缓冲区打满 |
+| 同一台机器上的 Hysteria2 | 正常，几十 Mbps | 不是线路总带宽不够 |
+
+**结论**：这条路径对**明文 QUIC** 做了限速/整形。Hysteria2 能活下来是因为它默认带
+`salamander` 混淆，把 QUIC 包伪装过；TUIC 的握手特征太明显。
+
+**处置**：别在 TUIC 上耗时间，直接换一个 **TCP 系的轻量协议**。
+Shadowsocks 2022 是最省事的选择（无 TLS 握手、握手往返最少、客户端兼容面广）。
+`deploy_nodes.py` 已经把 TUIC 改成可选、SS 改成默认（`TUIC_PORT` 留空即不部署）。
+
+> 顺带一提：如果某天发现 Hysteria2 也掉了，先把 `obfs` 打开再排查别的。
+
+---
+
+## §9 Shadowsocks 2022 的三个必填项
+
+漏一个核心就直接起不来，而且报错完全不提「SS」。
+
+### 9.1 客户端 config 的键是 `shadowsocks16`，不是 `shadowsocks`
+
+`clients.config` 里 2022 系列要用 `shadowsocks16`：
+
+```json
+{"shadowsocks16": {"name": "jp", "password": "<psk>"}}
+```
+
+写成 `shadowsocks` 的后果：
+
+```
+restartSb: sql: Scan error ... json_extract(clients.config, "$.shadowsocks16"):
+converting NULL to string is unsupported
+```
+
+然后 sing-box 核心**整个挂掉**，所有节点端口一起消失（不只是 SS）。
+排查时容易以为是自己把面板搞崩了。
+
+### 9.2 服务端 `options` 必须有 `password`（psk）
+
+只有 `method` 不够：
+
+```
+initialize inbound[4]: missing psk
+```
+
+psk 要同时写在入站顶层（API 传参）和 `out_json` 里，见 §3.10。
+
+### 9.3 psk 长度由 method 决定
+
+| method | psk 字节数 | base64 长度 |
+|---|---|---|
+| `2022-blake3-aes-128-gcm` | 16 | 24（末尾 `==`） |
+| `2022-blake3-aes-256-gcm` | 32 | 44（末尾 `=`） |
+| `2022-blake3-chacha20-poly1305` | 32 | 44（末尾 `=`） |
+
+必须是**标准 base64（带 `=` 填充）**，不能像别的密码那样用 urlsafe 去填充版。
+长度不对 → `initialize inbound: invalid password`。
+
+### 9.4 客户端里的密码格式是 `psk:psk`
+
+mihomo 的 `ss` 代理，2022 系列要写 `服务器psk:用户psk`。只有一个用户时两边相同：
+
+```yaml
+- name: JP-Shadowsocks-2087
+  type: ss
+  cipher: 2022-blake3-aes-128-gcm
+  password: AAAAAAAAAAAAAAAAAAAAAA==:AAAAAAAAAAAAAAAAAAAAAA==
+```
+
+（上面是两个占位 psk，真实值由部署脚本生成；只有单用户时两边相同。）
+
+只写一个 psk 会认证失败。订阅生成的是正确格式，手写配置时才容易漏。
+
+### 9.5 SS 默认同时监听 tcp 和 udp
+
+sing-box 的 shadowsocks 入站默认开 UDP relay，`ss -lntu` 里会看到
+`tcp *:2087` **和** `udp *:2087` 两个 socket。
+
+如果防火墙只放行了 tcp，UDP 那个 socket 白开着、静默丢包 —— 表现为
+「网页能开，但客户端开 UDP 转发后某些应用不通」。
+**tcp 和 udp 都要放行**（`setup_base.sh` 的 `SS_PORT` 已经两个都写）。
+
+### 9.6 `salt not unique` 不是服务端问题
+
+高并发拨测时服务端日志会出现：
+
+```
+inbound/shadowsocks[...] process connection from x.x.x.x:port:
+shadowsocks: serve TCP from ...: salt not unique
+```
+
+这是**客户端重复使用同一个 salt**（SS2022 的防重放机制触发）。
+16 字节随机 salt 正常不会撞，所以基本是客户端实现的锅。
+偶发几条无所谓；如果频繁出现导致连接失败，换客户端版本或换加密方式，不要改服务端。
+
+---
+
+## §10 在 Windows（Git Bash）上跑这套脚本的工具链坑
+
+### 10.1 `py` 启动器会读脚本的 `#!` 行
+
+`deploy_nodes.py` 开头是 `#!/usr/bin/env python`，Windows 的 `py.exe` 会照着
+shebang 去找 `python` —— 找到的可能是一个**没装 paramiko** 的解释器，于是：
+
+```
+缺少 paramiko，无法建立 SSH 连接
+当前解释器：C:\...\python\versions\3.13.12\python.exe
+```
+
+`py -c "import paramiko"` 明明能过，`py scripts/deploy_nodes.py` 却报缺包，就是这个原因。
+
+**解法**：用装好依赖的解释器全路径执行，不要用 `py 脚本.py`：
+
+```bash
+"C:/Users/<you>/AppData/Local/Programs/Python/Python311/python.exe" scripts/deploy_nodes.py
+```
+
+### 10.2 没有 `bc`、没有 `/usr/bin/time`
+
+Git Bash 里这两个都不存在。计时用 `date +%s.%N` 或直接 Python；
+算术用 `awk`：
+
+```bash
+awk -v a=1.5 -v b=2 'BEGIN{printf "%.2f\n", a/b}'
+```
+
+### 10.3 `grep -c $'\r'` 测不出 CRLF
+
+`grep -c` 数的是**行**，不是字符。要数字节：
+
+```bash
+tr -dc '\r' < file | wc -c
+```
+
+### 10.4 `pkill -f` / `pgrep -f` 会匹配到自己
+
+`pkill -f "sleep 180"` 会把自己这条命令也匹配上，**连 SSH 会话一起杀掉**。
+用方括号技巧规避：
+
+```bash
+ps -eo pid,args | grep -F "[s]leep 180"
+```
+
+### 10.5 MSYS 会把 `/path` 自动转成 Windows 路径
+
+`curl -d "data=/inbounds/del/4"` 里的 `/inbounds/del/4` 会被改写成
+`D:/.../PortableGit/inbounds/del/4`，请求直接 404。
+加 `MSYS_NO_PATHCONV=1`，或者干脆把这类调用封进 Python 子命令里
+（本 skill 的 `sui_api.py` 就是 Python 实现，绕开了这个问题）。

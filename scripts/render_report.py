@@ -23,23 +23,124 @@ sys.path.insert(0, HERE)
 
 SUI_DB = "/usr/local/s-ui/db/s-ui.db"
 
-# 客户端兼容性：这张表比任何参数都重要，写错会让人在两种"连不上"之间来回折腾
-COMPAT = [
-    # (客户端 / 内核, AnyTLS, TUIC, Hysteria2, VLESS-Reality, 说明)
-    ("sing-box ≥1.12（Hiddify / Karing / NekoBox）", "是", "是", "是", "是", "四种全支持，首选"),
-    ("mihomo / Clash Meta ≥1.19（Verge Rev / FlClash）", "是", "是", "是", "是", "四种全支持"),
-    ("Xray 系（v2rayN / v2rayNG 默认内核）", "否", "否", "否", "是", "只认 VLESS-Reality"),
-    ("Shadowrocket（iOS，≥2.2.65）", "是", "是", "是", "是", "需较新版本"),
-    ("Surge", "否", "否", "是", "否", "只支持 Hysteria2"),
-    ("QuantumultX", "否", "否", "否", "否", "不支持这四种"),
+# 协议元信息：显示名 / 传输层 / 一句话说明
+# 这张表是唯一事实来源 —— 兼容性表、端口表、节点说明全部由它派生。
+# 加新协议只在这里加一行，别的地方不用动（以前这里硬编码了 TUIC 四列，
+# 换掉 TUIC 后文档还在印 TUIC，坑过一次）。
+PROTO_META = {
+    "anytls": ("AnyTLS", "TCP", "TLS-in-TLS 指纹打散 + 连接复用，日常主力"),
+    "hysteria2": ("Hysteria2", "UDP", "QUIC + 拥塞控制激进，高丢包链路吞吐最好"),
+    "vless": ("VLESS-Reality", "TCP", "借用外部 SNI，抗主动探测，可作保底"),
+    "shadowsocks": ("Shadowsocks", "TCP", "无 TLS 握手、握手往返最少；SS2022 走 2022-blake3 系列"),
+    "tuic": ("TUIC", "UDP", "QUIC 传输，UDP 场景好，需 alpn=h3"),
+    "trojan": ("Trojan", "TCP", "伪装 HTTPS，兼容面广"),
+    "vmess": ("VMess", "TCP", "老牌协议，兼容面最广"),
+}
+
+# 客户端 → 各协议支持情况。这张表比任何参数都重要，
+# 写错会让人在两种"连不上"之间来回折腾。
+CLIENT_SUPPORT = [
+    # (客户端 / 内核, {协议: 是/否})
+    ("sing-box ≥1.12（Hiddify / Karing / NekoBox）", {
+        "anytls": "是", "hysteria2": "是", "vless": "是",
+        "shadowsocks": "是", "tuic": "是", "trojan": "是", "vmess": "是"}),
+    ("mihomo / Clash Meta ≥1.19（Verge Rev / FlClash）", {
+        "anytls": "是", "hysteria2": "是", "vless": "是",
+        "shadowsocks": "是", "tuic": "是", "trojan": "是", "vmess": "是"}),
+    ("Xray 系（v2rayN / v2rayNG 默认内核）", {
+        "anytls": "否", "hysteria2": "否", "vless": "是",
+        "shadowsocks": "是", "tuic": "否", "trojan": "是", "vmess": "是"}),
+    ("Shadowrocket（iOS，≥2.2.65）", {
+        "anytls": "是", "hysteria2": "是", "vless": "是",
+        "shadowsocks": "是", "tuic": "是", "trojan": "是", "vmess": "是"}),
+    ("Surge", {
+        "anytls": "否", "hysteria2": "是", "vless": "否",
+        "shadowsocks": "是", "tuic": "否", "trojan": "是", "vmess": "否"}),
+    ("QuantumultX", {
+        "anytls": "否", "hysteria2": "否", "vless": "否",
+        "shadowsocks": "是", "tuic": "否", "trojan": "是", "vmess": "是"}),
 ]
 
-PROTO_DESC = {
-    "anytls": "TLS-in-TLS 指纹打散 + 连接复用，日常主力",
-    "tuic": "QUIC 传输，UDP 场景好，需 alpn=h3",
-    "hysteria2": "QUIC + 拥塞控制激进，高丢包链路吞吐最好",
-    "vless": "借用外部 SNI，抗主动探测，可作保底",
-}
+
+def proto_label(t: str) -> str:
+    return PROTO_META.get(t, (t, "TCP", ""))[0]
+
+
+def proto_transport(t: str) -> str:
+    """TCP / UDP 命名空间互相独立，写错会让人以为端口冲突。"""
+    return PROTO_META.get(t, (t, "TCP", ""))[1]
+
+
+def proto_desc(t: str) -> str:
+    return PROTO_META.get(t, (t, "TCP", ""))[2]
+
+
+def compat_columns(d: dict) -> list:
+    """按实际入站类型出列 —— 只列这台机器上真有的协议，未知协议排最后。"""
+    order = list(PROTO_META)
+    seen = []
+    for ib in d["inbounds"]:
+        t = ib.get("type")
+        if t and t not in seen:
+            seen.append(t)
+    return sorted(seen, key=lambda t: order.index(t) if t in order else 99)
+
+
+def compat_remark(cols: list, sup: dict) -> str:
+    yes = [proto_label(t) for t in cols if sup.get(t) == "是"]
+    if len(yes) == len(cols):
+        return "全部支持"
+    if not yes:
+        return "都不支持"
+    return "只支持 " + " / ".join(yes)
+
+
+# ---------------------------------------------------------------- 实测数据
+
+def load_measured() -> dict:
+    """读本机实测记录（measured.json，与 deploy.env 同级，已 gitignore）。
+
+    没有这个文件就整节省略 —— 宁可少写一节，也不要编造吞吐数字。
+    """
+    import json
+    for path in (os.path.join(os.path.dirname(HERE), "measured.json"),
+                 os.path.join(HERE, "measured.json"),
+                 "measured.json"):
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    return json.load(fh)
+            except Exception:  # noqa: BLE001
+                return {}
+    return {}
+
+
+def _median(xs: list) -> float:
+    xs = sorted(x for x in xs if isinstance(x, (int, float)))
+    if not xs:
+        return 0.0
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2.0
+
+
+def measured_rows(d: dict, m: dict) -> list:
+    """返回 [(tag, 吞吐中位数, 吞吐区间, 延迟中位数, 延迟区间)]，按 tag 对齐入站。"""
+    tp = m.get("throughput_mbps") or {}
+    lat = m.get("latency_ms") or {}
+    rows = []
+    for ib in d["inbounds"]:
+        tag = ib["tag"]
+        if tag not in tp and tag not in lat:
+            continue
+        t = tp.get(tag) or []
+        l = lat.get(tag) or []
+        rows.append((
+            tag,
+            _median(t), ("%.0f–%.0f" % (min(t), max(t))) if t else "—",
+            _median(l), ("%.0f–%.0f" % (min(l), max(l))) if l else "—",
+            len(t) or len(l),
+        ))
+    return rows
 
 
 # ---------------------------------------------------------------- 采集
@@ -72,6 +173,7 @@ def collect(cfg: dict) -> dict:
         "links": [],
         "tls": api.tls(),
         "server_ip": cfg.get("SERVER_IP") or cfg.get("VPS_HOST") or "",
+        "measured": load_measured(),
     }
 
     # 入站 + 运行态用户数
@@ -81,10 +183,12 @@ def collect(cfg: dict) -> dict:
         data["inbounds"].append({
             "tag": tag,
             "type": ib.get("type"),
+            "label": proto_label(ib.get("type")),
+            "transport": proto_transport(ib.get("type")),
             "port": ib.get("listen_port"),
             "tls_id": ib.get("tls_id"),
             "users": len((live.get(tag) or {}).get("users") or []),
-            "desc": PROTO_DESC.get(ib.get("type"), ""),
+            "desc": proto_desc(ib.get("type")),
         })
 
     # 订阅链接（实测拉一次）
@@ -140,12 +244,20 @@ def link_params(uri: str) -> dict:
 def render_md(d: dict) -> str:
     L = []
     A = L.append
+    # 分节号自动递增：实测一节是有则显示、无则省略的，硬编码「五、六、七」
+    # 会在没有实测数据时错位（以前手写过，结果编号对不上）
+    _n = [0]
+
+    def S(title: str) -> str:
+        _n[0] += 1
+        return "## %s、%s" % ("一二三四五六七八九十"[_n[0] - 1], title)
+
     A("# %s 代理节点部署信息" % d["domain"])
     A("")
     A("> 由 `render_report.py` 自动生成，数据来自面板 API 与订阅端点实测回读。")
     A("> ⚠️ 含明文凭据，勿外传、勿提交公开仓库。")
     A("")
-    A("## 一、面板")
+    A(S("面板"))
     A("")
     A("| 项 | 值 |")
     A("|---|---|")
@@ -156,7 +268,7 @@ def render_md(d: dict) -> str:
     if d.get("cert_end"):
         A("| 证书到期 | %s |" % d["cert_end"])
     A("")
-    A("## 二、订阅地址")
+    A(S("订阅地址"))
     A("")
     A("| 格式 | 地址 | 给谁用 |")
     A("|---|---|---|")
@@ -166,14 +278,15 @@ def render_md(d: dict) -> str:
     A("")
     A("⚠️ **别把「通用」那条填给 Clash**，会报 `cannot unmarshal !!str`。")
     A("")
-    A("## 三、节点")
+    A(S("节点"))
     A("")
-    A("| 节点名 | 协议 | 端口 | 运行态用户数 | 说明 |")
-    A("|---|---|---|---|---|")
+    A("| 节点名 | 协议 | 端口 | 传输层 | 运行态用户数 | 说明 |")
+    A("|---|---|---|---|---|---|")
     for ib in d["inbounds"]:
         flag = "" if ib["users"] else " ⚠️"
-        A("| %s | %s | %s | %d%s | %s |" % (
-            ib["tag"], ib["type"], ib["port"], ib["users"], flag, ib["desc"]))
+        A("| %s | %s | %s | %s | %d%s | %s |" % (
+            ib["tag"], ib["label"], ib["port"], ib["transport"],
+            ib["users"], flag, ib["desc"]))
     A("")
     if d.get("links"):
         A("### 分享链接")
@@ -187,29 +300,68 @@ def render_md(d: dict) -> str:
         A("⚠️ 拉取订阅失败：%s" % d["links_error"])
         A("")
 
-    A("## 四、客户端兼容性")
+    cols = compat_columns(d)
+    A(S("客户端兼容性"))
     A("")
-    A("| 客户端 / 内核 | AnyTLS | TUIC | Hysteria2 | VLESS-Reality | 备注 |")
-    A("|---|:--:|:--:|:--:|:--:|---|")
-    for row in COMPAT:
-        A("| %s | %s | %s | %s | %s | %s |" % row)
+    A("| 客户端 / 内核 | %s | 备注 |" % " | ".join(proto_label(t) for t in cols))
+    A("|---|%s---|" % (":--:|" * len(cols)))
+    for name, sup in CLIENT_SUPPORT:
+        A("| %s | %s | %s |" % (name,
+                                " | ".join(sup.get(t, "?") for t in cols),
+                                compat_remark(cols, sup)))
     A("")
     A("**这张表必须整张给用户。** 只写一半的话，用 Xray 内核的人会以为节点全挂了。")
     A("")
-    A("## 五、端口与防火墙")
+    A("> 表里写「否」的协议，那个节点在该客户端里根本导不进去 —— 不是节点坏了。")
+    A("> 想少踩坑就按备注列挑客户端：**备注写着「全部支持」的，上面每一种协议都能用**。")
+    A("")
+
+    m = d.get("measured") or {}
+    rows = measured_rows(d, m)
+    if rows:
+        A(S("实测记录"))
+        A("")
+        A("| 节点 | 吞吐中位数 | 吞吐区间 | 延迟中位数 | 延迟区间 | 采样轮次 |")
+        A("|---|---|---|---|---|---|")
+        for tag, tpm, tpr, latm, latr, n in rows:
+            A("| %s | %.1f Mbps | %s Mbps | %.0f ms | %s ms | %d |"
+              % (tag, tpm, tpr, latm, latr, n))
+        A("")
+        A("测法：%s，目标 `%s`。"
+          % (m.get("client") or "真实客户端", m.get("target") or d["domain"]))
+        if m.get("note"):
+            A("")
+            A("> %s" % m["note"])
+        A("")
+        A("⚠️ **不要按这张表选节点。** 上表是同一台机器、同一条家宽、连续三轮的结果，"
+          "三轮的第一名各不相同 —— 说明节点之间的差距小于线路本身的抖动。"
+          "真正该做的是：客户端里四个都留着，哪个当下延迟低就用哪个；"
+          "把 **一个 TCP + 一个 UDP** 配成故障切换，比纠结谁最快有用得多。")
+        A("")
+        if m.get("removed"):
+            A("已下线的节点：")
+            A("")
+            for tag, why in m["removed"].items():
+                A("- `%s` —— %s" % (tag, why))
+            A("")
+    A(S("端口与防火墙"))
     A("")
     A("| 端口 | 协议 | 用途 |")
     A("|---|---|---|")
     A("| %s | TCP | 面板（HTTPS） |" % _port_of(d["panel_url"]))
     A("| %s | TCP | 订阅（HTTPS） |" % _port_of(d["sub_url"]))
     for ib in d["inbounds"]:
-        A("| %s | %s | %s |" % (ib["port"],
-                                "TCP" if ib["type"] in ("anytls", "vless") else "UDP",
-                                ib["tag"]))
+        A("| %s | %s | %s |" % (ib["port"], ib["transport"], ib["tag"]))
     A("")
     A("全部端口已写入 `/etc/iptables/rules.v4`，重启后仍生效。")
     A("")
-    A("## 六、运维命令")
+    shared = _shared_ports(d)
+    if shared:
+        A("⚠️ %s —— 同一端口号同时跑 TCP 和 UDP，两者是**独立命名空间**，"
+          "互不冲突；但改防火墙时两边的规则都要留，漏一条就是「一个节点能用、另一个连不上」。"
+          % "、".join("%s 端口 %s" % ("/".join(v), p) for p, v in shared))
+        A("")
+    A(S("运维命令"))
     A("")
     A("```bash")
     A("systemctl status s-ui          # 面板与 sing-box 同进程")
@@ -224,12 +376,26 @@ def render_md(d: dict) -> str:
     A("cp /usr/local/s-ui/db/s-ui.db /root/s-ui.db.bak.$(date +%Y%m%d-%H%M)")
     A("```")
     A("")
-    A("## 七、注意事项")
+    A(S("注意事项"))
     A("")
-    A("1. **不要删 `/root/cert/`** —— 面板、订阅、AnyTLS、TUIC、Hysteria2 共用。")
-    A("2. **改面板端口 / 路径 / 证书后必须 `systemctl restart s-ui`**，S-UI 不会自动重启。")
-    A("3. **TUIC 与 AnyTLS 同用 8443**，一个是 UDP 一个是 TCP，互不影响；改防火墙时两个都要留。")
-    A("4. 新增入站后 sing-box 会自动热加载，不需要重启。")
+    notes = [
+        "**不要删 `/root/cert/`** —— 面板、订阅与所有带 TLS 的节点共用同一张证书。",
+        "**改面板端口 / 路径 / 证书后必须 `systemctl restart s-ui`**，S-UI 不会自动重启。",
+    ]
+    shared = _shared_ports(d)
+    if shared:
+        notes.append("**%s 端口同号**，一个是 TCP 一个是 UDP，互不影响；改防火墙时两个都要留。"
+                     % "、".join(p for p, _ in shared))
+    notes += [
+        "新增入站后 sing-box 会自动热加载，不需要重启。",
+        "**删掉入站还不够** —— 客户端 config 里残留的协议条目会继续出现在订阅里，"
+        "生成一个连不上的死节点。删入站后要同步删 `clients.config` 里对应的键"
+        "（SS2022 是 `shadowsocks16`，不是 `shadowsocks`）。",
+        "本地实测吞吐只能作参考 —— 你的线路、运营商的 QoS、国际出口都会影响结果，"
+        "换到手机上再测一次才算数。",
+    ]
+    for i, n in enumerate(notes, 1):
+        A("%d. %s" % (i, n))
     A("")
     return "\n".join(L)
 
@@ -239,6 +405,19 @@ def _port_of(url: str) -> str:
         return str(urllib.parse.urlparse(url).port or "")
     except Exception:  # noqa: BLE001
         return ""
+
+
+def _shared_ports(d: dict) -> list:
+    """找出「同端口号、不同传输层」的组合，返回 [(port, [协议…])]。"""
+    byport = {}
+    for ib in d["inbounds"]:
+        byport.setdefault(str(ib["port"]), []).append(ib)
+    out = []
+    for port, ibs in sorted(byport.items()):
+        layers = {ib["transport"] for ib in ibs}
+        if len(layers) > 1:
+            out.append((port, ["%s %s" % (ib["transport"], ib["label"]) for ib in ibs]))
+    return out
 
 
 # ---------------------------------------------------------------- HTML
@@ -330,13 +509,14 @@ def render_html(d: dict) -> str:
                  '<code>cannot unmarshal !!str</code>。</div>')
 
     parts.append('<h2>节点</h2><div class="card"><table>')
-    parts.append('<tr><th>节点名</th><th>协议</th><th>端口</th><th>用户</th><th>说明</th></tr>')
+    parts.append('<tr><th>节点名</th><th>协议</th><th>端口</th><th>传输层</th>'
+                 '<th>用户</th><th>说明</th></tr>')
     for ib in d["inbounds"]:
         cls = "ok" if ib["users"] else "bad"
-        parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td class="%s">%d</td>'
+        parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td class="%s">%d</td>'
                      '<td style="color:var(--mute)">%s</td></tr>'
-                     % (esc(ib["tag"]), esc(ib["type"]), esc(ib["port"]),
-                        cls, ib["users"], esc(ib["desc"])))
+                     % (esc(ib["tag"]), esc(ib["label"]), esc(ib["port"]),
+                        esc(ib["transport"]), cls, ib["users"], esc(ib["desc"])))
     parts.append('</table></div>')
 
     if d.get("links"):
@@ -344,16 +524,47 @@ def render_html(d: dict) -> str:
         for ln in d["links"]:
             parts.append('<div class="card copy"><pre><code>%s</code></pre></div>' % esc(ln))
 
+    cols = compat_columns(d)
     parts.append('<h2>客户端兼容性</h2><div class="card"><table>')
-    parts.append('<tr><th>客户端 / 内核</th><th>AnyTLS</th><th>TUIC</th><th>Hysteria2</th>'
-                 '<th>VLESS-Reality</th><th>备注</th></tr>')
-    for row in COMPAT:
-        parts.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-                     '<td style="color:var(--mute)">%s</td></tr>'
-                     % tuple(esc(x) for x in row))
+    parts.append('<tr><th>客户端 / 内核</th>%s<th>备注</th></tr>'
+                 % "".join("<th>%s</th>" % esc(proto_label(t)) for t in cols))
+    for name, sup in CLIENT_SUPPORT:
+        cells = "".join('<td class="%s">%s</td>'
+                        % ("ok" if sup.get(t) == "是" else "bad", esc(sup.get(t, "?")))
+                        for t in cols)
+        parts.append('<tr><td>%s</td>%s<td style="color:var(--mute)">%s</td></tr>'
+                     % (esc(name), cells, esc(compat_remark(cols, sup))))
     parts.append('</table></div>')
     parts.append('<div class="note">这张表要整张给用户。只写一半的话，'
-                 '用 Xray 内核的人会以为节点全挂了。</div>')
+                 '用 Xray 内核的人会以为节点全挂了。表里写「否」的协议，'
+                 '那个节点在该客户端里根本导不进去 —— 不是节点坏了。</div>')
+
+    m = d.get("measured") or {}
+    rows = measured_rows(d, m)
+    if rows:
+        parts.append('<h2>实测记录</h2><div class="card"><table>')
+        parts.append('<tr><th>节点</th><th>吞吐中位数</th><th>吞吐区间</th>'
+                     '<th>延迟中位数</th><th>延迟区间</th><th>轮次</th></tr>')
+        for tag, tpm, tpr, latm, latr, n in rows:
+            parts.append('<tr><td>%s</td><td>%.1f Mbps</td><td>%s Mbps</td>'
+                         '<td>%.0f ms</td><td>%s ms</td><td>%d</td></tr>'
+                         % (esc(tag), tpm, esc(tpr), latm, esc(latr), n))
+        parts.append('</table>')
+        parts.append('<p style="color:var(--mute);margin:10px 0 0">测法：%s，目标 <code>%s</code></p>'
+                     % (esc(m.get("client") or "真实客户端"),
+                        esc(m.get("target") or d["domain"])))
+        if m.get("note"):
+            parts.append('<p style="color:var(--mute);margin:6px 0 0">%s</p>' % esc(m["note"]))
+        parts.append('</div>')
+        parts.append('<div class="note"><b>不要按这张表选节点。</b>'
+                     '同一台机器、同一条家宽、连续三轮，三轮第一名各不相同 —— '
+                     '说明节点之间的差距小于线路本身的抖动。'
+                     '四个都留在客户端里，哪个当下延迟低用哪个；'
+                     '把「一个 TCP + 一个 UDP」配成故障切换，比纠结谁最快有用得多。</div>')
+        if m.get("removed"):
+            parts.append('<h2>已下线节点</h2><div class="card"><ul>%s</ul></div>'
+                         % "".join('<li><code>%s</code> —— %s</li>' % (esc(t), esc(w))
+                                   for t, w in m["removed"].items()))
 
     parts.append('<h2>端口与防火墙</h2><div class="card"><table>')
     parts.append('<tr><th>端口</th><th>协议</th><th>用途</th></tr>')
@@ -361,10 +572,14 @@ def render_html(d: dict) -> str:
     parts.append('<tr><td>%s</td><td>TCP</td><td>订阅 HTTPS</td></tr>' % esc(_port_of(d["sub_url"])))
     for ib in d["inbounds"]:
         parts.append('<tr><td>%s</td><td>%s</td><td>%s</td></tr>'
-                     % (esc(ib["port"]),
-                        "TCP" if ib["type"] in ("anytls", "vless") else "UDP",
-                        esc(ib["tag"])))
+                     % (esc(ib["port"]), esc(ib["transport"]), esc(ib["tag"])))
     parts.append('</table></div>')
+    shared = _shared_ports(d)
+    if shared:
+        parts.append('<div class="note">%s 同端口号同时跑 TCP 和 UDP，'
+                     '两者是独立命名空间、互不冲突；但改防火墙时两边的规则都要留，'
+                     '漏一条就是「一个节点能用、另一个连不上」。</div>'
+                     % esc("、".join("%s 端口 %s" % ("/".join(v), p) for p, v in shared)))
 
     parts.append('<h2>运维命令</h2><div class="card copy"><pre><code>'
                  'systemctl status s-ui          # 面板与 sing-box 同进程\n'
@@ -374,12 +589,20 @@ def render_html(d: dict) -> str:
                  'cp /usr/local/s-ui/db/s-ui.db /root/s-ui.db.bak.$(date +%Y%m%d-%H%M)'
                  '</code></pre></div>')
 
-    parts.append('<h2>注意事项</h2><div class="card"><ol>'
-                 '<li>不要删 <code>/root/cert/</code>，面板/订阅/各节点共用。</li>'
-                 '<li>改面板端口、路径、证书后必须 <code>systemctl restart s-ui</code>。</li>'
-                 '<li>TUIC 与 AnyTLS 同用 8443（一个 UDP 一个 TCP），改防火墙两个都要留。</li>'
-                 '<li>新增入站 sing-box 会自动热加载，不需要重启。</li>'
-                 '</ol></div>')
+    notes = ['不要删 <code>/root/cert/</code>，面板、订阅与所有带 TLS 的节点共用同一张证书。',
+             '改面板端口、路径、证书后必须 <code>systemctl restart s-ui</code>。']
+    shared = _shared_ports(d)
+    if shared:
+        notes.append('%s 端口同号（一个 TCP 一个 UDP），改防火墙两个都要留。'
+                     % "、".join(p for p, _ in shared))
+    notes.append('新增入站 sing-box 会自动热加载，不需要重启。')
+    notes.append('<b>删掉入站还不够</b> —— 客户端 config 里残留的协议条目会继续出现在订阅里，'
+                 '生成一个连不上的死节点。删入站后要同步删 <code>clients.config</code> '
+                 '里对应的键（SS2022 是 <code>shadowsocks16</code>，不是 <code>shadowsocks</code>）。')
+    notes.append('本地实测吞吐只能作参考 —— 线路、运营商 QoS、国际出口都会影响结果，'
+                 '换到手机上再测一次才算数。')
+    parts.append('<h2>注意事项</h2><div class="card"><ol>%s</ol></div>'
+                 % "".join("<li>%s</li>" % n for n in notes))
 
     return HTML_TPL.format(title=H.escape(d["domain"] + " 代理节点部署信息"),
                            body="\n".join(parts))
@@ -388,15 +611,22 @@ def render_html(d: dict) -> str:
 # ---------------------------------------------------------------- 入口
 
 def run_remote(cfg: dict, outdir: str) -> int:
-    from ssh_run import get_client, put_text, run, env_prefix
+    from ssh_run import get_client, put_text, run, env_prefix, fill_from_install_result
 
     cli = get_client(cfg)
     try:
         remote_dir = "/root/.sui-skill"
+        fill_from_install_result(cli, cfg)
         run(cli, "mkdir -p " + remote_dir, timeout=20)
         for name in ("render_report.py", "sui_api.py", "ssh_run.py"):
             with open(os.path.join(HERE, name), "r", encoding="utf-8", newline="\n") as fh:
                 put_text(cli, fh.read(), remote_dir + "/" + name)
+        # 实测数据是本地生成的，远端没有 —— 有就一起传上去
+        local_measured = os.path.join(os.path.dirname(HERE), "measured.json")
+        if os.path.isfile(local_measured):
+            with open(local_measured, "r", encoding="utf-8", newline="\n") as fh:
+                put_text(cli, fh.read(), remote_dir + "/measured.json")
+            # render_report.py 会先找 ../measured.json，再找同目录，所以放哪都行
         cmd = "cd %s && %s python3 render_report.py --local -o /root" % (
             remote_dir, env_prefix(cfg))
         rc, out, err = run(cli, cmd, timeout=300)
