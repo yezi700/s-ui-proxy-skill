@@ -34,5 +34,8 @@ tmp/
 .cache/
 
 # 脚本产出的备份（含真实凭据，绝不能进仓库）
+# *.bak 覆盖 deploy.env.vps1-*.bak / VPS-*.md.20261109.bak 这类手工备份
+*.bak
+*.bak-*
 backup/
 vps/

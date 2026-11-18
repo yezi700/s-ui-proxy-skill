@@ -19,7 +19,7 @@ SUB_PATH="${SUB_PATH:-}"
 SUB_ID="${SUB_ID:-us}"
 ANYTLS_PORT="${ANYTLS_PORT:-8443}"
 TUIC_PORT="${TUIC_PORT-}"           # 留空 = 不检查（默认不部署 TUIC）
-SS_PORT="${SS_PORT-2087}"           # 留空 = 不检查
+SS_PORT="${SS_PORT-}"              # 留空 = 不检查（默认不部署）
 HY2_PORT="${HY2_PORT:-2083}"
 HY2_HOP_RANGE="${HY2_HOP_RANGE-58888:60888}"   # 留空 = 不检查端口跳跃
 REALITY_PORT="${REALITY_PORT-}"     # 留空 = 不检查（未部署 Reality）

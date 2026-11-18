@@ -30,7 +30,7 @@ REALITY_PORT="${REALITY_PORT-}"
 HY2_PORT="${HY2_PORT:-2083}"
 # Shadowsocks 端口。⚠️ SS 入站默认带 UDP relay，sing-box 会同时监听 tcp+udp，
 # 只放行 tcp 会让 udp 那个 socket 白开着、静默丢包。留空 = 不部署 SS。
-SS_PORT="${SS_PORT-2087}"
+SS_PORT="${SS_PORT-}"
 HY2_HOP_RANGE="${HY2_HOP_RANGE:-58888:60888}"
 ACME_PORT="${ACME_PORT:-80}"
 # 1 = 屏蔽 IPv6，强制代理仅走 IPv4 出口（默认开启）

@@ -11,8 +11,8 @@ metadata:
 
 ## 用途
 
-把一台**全新的 Linux VPS** 变成一套可用的代理服务：S-UI 管理面板 + 最多四种互补的代理协议节点
-（默认四个，`REALITY_PORT` / `SS_PORT` / `TUIC_PORT` 留空可裁剪），
+把一台**全新的 Linux VPS** 变成一套可用的代理服务：S-UI 管理面板 + **默认两个**代理协议节点
+（Reality / Shadowsocks / TUIC 填了端口才部署），
 并输出可直接导入客户端的分享链接与三格式订阅地址。
 
 | 产物 | 说明 |
@@ -20,16 +20,17 @@ metadata:
 | S-UI 面板 | 随机路径 + 随机端口 + Let's Encrypt 证书（HTTPS），内嵌 sing-box |
 | 节点 1：AnyTLS | TCP 8443，解决 TLS-in-TLS 指纹，自带连接复用 —— 实测 207ms，每个请求只付 1 个 RTT |
 | 节点 2：Hysteria2 | UDP 2083，高丢包链路吞吐最强；**58888-60888 端口跳跃默认开**，抗单端口 UDP QoS |
-| 节点 3：VLESS + Reality + Vision | TCP 2053，抗主动探测，不依赖自有域名 —— 但 3 个 RTT，丢包线路上永远垫底，只作应急 |
-| 节点 4：Shadowsocks 2022 | TCP 2087，客户端兼容面最广；无握手但仍要建 TCP |
-| （可选）TUIC v5 | UDP 8443，`TUIC_PORT` 填了才部署 —— 见下方「TUIC 默认关闭」 |
+| （按需）VLESS + Reality + Vision | TCP 2053，抗主动探测、不依赖自有域名；但 3 个 RTT，丢包线路上永远垫底。填 `REALITY_PORT` 才部署 |
+| （按需）Shadowsocks 2022 | TCP 2087，客户端兼容面最广（Surge / QX / Xray 内核）。填 `SS_PORT` 才部署 |
+| （按需）TUIC v5 | UDP 8443，实测被限速到 0.2~0.4 Mbps，基本不要开 —— 见下方「TUIC 默认关闭」 |
 | 三条订阅 | 通用 base64 / Clash YAML / sing-box JSON，同一客户端身份天然合并 |
 | 交付文档 | 面板凭据、节点参数、兼容性矩阵、防火墙、运维命令、实测数据 |
 
-后三个都是**可关的**：`REALITY_PORT` / `SS_PORT` / `TUIC_PORT` 留空即不部署。
-丢包严重的小鸡上，实测 TCP 系协议（AnyTLS / SS / Reality）吞吐几乎同值，
-撞的是同一条跨境线路的天花板 —— 换协议不解决，只留 **Hy2 + AnyTLS** 两个就够
-（Hy2 吃带宽、AnyTLS 保 UDP 被封的场景），见 `references/pitfalls.md` §6.12。
+**为什么默认只留两个**：2026-11 在一台丢包 20% 的美国小鸡上实测，
+AnyTLS / SS / Reality 三个 TCP 协议吞吐 8.1 / 8.3 / 9.8 Mbps —— 实现完全不同却几乎同值，
+说明撞的是跨境路径的天花板，多留只是让订阅里多两个慢节点。
+Hy2 吃带宽、AnyTLS 保「UDP 被封」的场景，这两个就覆盖了 95% 的用法。
+详见 `references/pitfalls.md` §6.12；要加回 Reality / SS 就把对应端口填上重跑 `deploy_nodes.py`。
 
 ## 何时使用
 
@@ -183,13 +184,16 @@ python scripts/deploy_nodes.py
 创建内容：
 - TLS 对象：域名证书（LE）必有；`reality-<域名>` 只在部署 Reality 时创建；
   `tuic-<域名>` 只在部署 TUIC 时创建（**必须带 alpn h3**）
-- 入站（AnyTLS / Hysteria2 必有，Reality / Shadowsocks 2022 可选），全部带 `addrs` 与 `out_json`。
+- 入站：**默认只有 AnyTLS + Hysteria2**；填了 `REALITY_PORT` / `SS_PORT` / `TUIC_PORT`
+  才追加对应节点。全部带 `addrs` 与 `out_json`。
   Shadowsocks 的 `method` / `password` 放在入站**顶层**，不是 `options`（见 pitfalls §3.10）
 - 1 个订阅用户，一个身份绑定全部入站（S-UI 天然一条订阅出全部节点，不需要合并脚本）
 
-节点集是可配的：`REALITY_PORT` / `SS_PORT` / `TUIC_PORT` 留空就不生成对应节点
+节点集完全可配：`REALITY_PORT` / `SS_PORT` / `TUIC_PORT` 不填（或留空）就不生成对应节点
 （客户端 `config` 里对应的键也不会写 —— 多写一条会在订阅里生成死节点），
 `setup_base.sh` 的防火墙规则也跟着走 —— 不会出现「建了节点但端口没开」的半成品。
+已经部署过的机器要增减节点，改完 `deploy.env` 重跑本脚本即可（幂等），
+多余的入站用 `prune_vps.py` 式的做法清掉。
 
 Reality 密钥对用 `openssl genpkey -algorithm X25519` 生成，
 取 PKCS8/SPKI DER 的末 32 字节转 base64url —— 与 Xray 的 `privateKey` 格式一致。

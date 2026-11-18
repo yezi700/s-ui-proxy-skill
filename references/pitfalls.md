@@ -1032,6 +1032,11 @@ Hiddify / Karing / NekoBox 这类吃 JSON 订阅的客户端上出现，**很难
 （要测就得在同一台机器上另起一套 Xray + nginx 回落），而且它仍然是 TCP；
 **naive 见 §6.11**，会毒掉整份 sing-box 订阅。两者在丢包线路上都不会比 AnyTLS 快。
 
+> 从 2026-11 起，**「只留 Hy2 + AnyTLS」就是本 skill 的默认**：
+> `REALITY_PORT` / `SS_PORT` / `TUIC_PORT` 不填即不部署（`examples/deploy.env.example`
+> 里这两项默认留空）。要给某台机器加回来，就在它的 `deploy.env` 里填端口重跑
+> `deploy_nodes.py` —— 已存在的入站会跳过，不会动既有凭据。
+
 ## §7 验证方法
 
 ### 7.1 三层验证，缺一不可

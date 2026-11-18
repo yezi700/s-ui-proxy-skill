@@ -2,15 +2,20 @@
 # -*- coding: utf-8 -*-
 """在 S-UI 上创建入站与订阅用户。
 
-默认四个协议，全部避开 443（实测 443 被针对性干扰，详见 references/pitfalls.md §1）：
+**默认只部署两个**（覆盖 95% 的场景），全部避开 443（实测 443 被针对性干扰，详见 pitfalls §1）：
 
-    AnyTLS + TLS      8443/tcp   解决 TLS-in-TLS 指纹，自带连接复用
-    Hysteria2         2083/udp   高丢包链路吞吐最好（salamander 混淆抗 QUIC 限速）
-    VLESS+Reality     2053/tcp   抗主动探测，可作保底
-    Shadowsocks 2022  2087/tcp   无 TLS 握手、延迟最低，实测这条线路最快
+    AnyTLS + TLS      8443/tcp   解决 TLS-in-TLS 指纹，自带连接复用，1 个 RTT
+    Hysteria2         2083/udp   高丢包链路吞吐最好（实测 51.8 vs TCP 系 8~10 Mbps）
 
-TUIC 默认**不再部署**：实测被限速到 0.2~0.4 Mbps（换端口、换客户端都一样），
-想开就把 deploy.env 里的 TUIC_PORT 填上，见 references/pitfalls.md §6.8。
+其余三个都是**按需开启**，deploy.env 里填了端口才部署：
+
+    VLESS+Reality     2053/tcp   抗主动探测、不依赖自有域名；但 3 个 RTT，丢包线路上垫底
+    Shadowsocks 2022  2087/tcp   客户端兼容面最广（Surge / QX / Xray 内核）
+    TUIC v5           8443/udp   实测被限速到 0.2~0.4 Mbps，基本不要开（pitfalls §6.8）
+
+为什么默认只留两个：2026-11 在丢包 20% 的美国小鸡上实测，AnyTLS / SS / Reality
+三个 TCP 协议吞吐 8.1 / 8.3 / 9.8 Mbps —— 实现完全不同却几乎同值，说明撞的是
+跨境路径的天花板，多留只是让订阅里多两个慢节点（pitfalls §6.12）。
 
 用法：
     python scripts/deploy_nodes.py              # 本地跑，自动上传到 VPS 执行
@@ -166,9 +171,9 @@ def node_specs(cfg: dict) -> list:
         raw = cfg.get(key)
         return default if raw is None else int(raw or 0)
 
-    reality_port = _opt("REALITY_PORT", 2053)   # 默认开；丢包线路可以关掉
+    reality_port = _opt("REALITY_PORT", 0)      # 默认关；要抗探测就填端口
     tuic_port = _opt("TUIC_PORT", 0)            # 默认关（§6.8）
-    ss_port = _opt("SS_PORT", 2087)             # 默认开
+    ss_port = _opt("SS_PORT", 0)                # 默认关；要客户端兼容面就填端口
 
     specs = [
         {

@@ -65,9 +65,10 @@ class TestKeyGen(unittest.TestCase):
 # ---------------------------------------------------------------- 节点声明
 
 class TestNodeSpecs(unittest.TestCase):
-    """默认节点集：AnyTLS / Hysteria2 / Reality / Shadowsocks 2022。
+    """默认节点集只有 AnyTLS + Hysteria2。
 
-    TUIC 默认关（pitfalls §6.8），要开得显式给 TUIC_PORT。
+    Reality / Shadowsocks / TUIC 都要在 deploy.env 里**显式填端口**才部署
+    （理由见 pitfalls §6.12：丢包线路上三个 TCP 协议吞吐几乎同值）。
     node_specs 内部有进程内缓存，所以每个用例都构造不同的 cfg 键值。
     """
 
@@ -76,61 +77,67 @@ class TestNodeSpecs(unittest.TestCase):
         self.specs = deploy_nodes.node_specs(self.cfg)
         self.by_type = {s["type"]: s for s in self.specs}
 
-    def test_default_four_nodes(self):
-        self.assertEqual(len(self.specs), 4)
-        self.assertEqual(set(self.by_type),
-                         {"anytls", "hysteria2", "vless", "shadowsocks"})
+    def _with(self, prefix, **kw):
+        cfg = {"DOMAIN": "example.com", "NODE_PREFIX": prefix}
+        cfg.update({k: str(v) for k, v in kw.items()})
+        return deploy_nodes.node_specs(cfg)
+
+    def test_default_two_nodes(self):
+        self.assertEqual(len(self.specs), 2)
+        self.assertEqual(set(self.by_type), {"anytls", "hysteria2"})
+
+    def test_reality_off_by_default(self):
+        self.assertNotIn("vless", self.by_type)
+
+    def test_ss_off_by_default(self):
+        self.assertNotIn("shadowsocks", self.by_type)
 
     def test_tuic_off_by_default(self):
         self.assertNotIn("tuic", self.by_type)
 
-    def test_tuic_only_when_port_given(self):
-        specs = deploy_nodes.node_specs(
-            {"DOMAIN": "example.com", "NODE_PREFIX": "T2", "TUIC_PORT": "8443"})
-        self.assertIn("tuic", {s["type"] for s in specs})
+    def test_reality_on_when_port_given(self):
+        specs = {s["type"]: s for s in self._with("T2", REALITY_PORT=2443)}
+        self.assertEqual(specs["vless"]["port"], 2443)
+        self.assertEqual(specs["vless"]["out_extra"].get("flow"), "xtls-rprx-vision")
 
-    def test_ss_off_when_port_blank(self):
-        """显式留空 = 关掉（区别于键不存在）。"""
-        specs = deploy_nodes.node_specs(
-            {"DOMAIN": "example.com", "NODE_PREFIX": "T3", "SS_PORT": ""})
-        self.assertNotIn("shadowsocks", {s["type"] for s in specs})
+    def test_ss_on_when_port_given(self):
+        """SS 自己就是加密协议，不该挂 TLS 对象。"""
+        specs = {s["type"]: s for s in self._with("T3", SS_PORT=2087)}
+        self.assertIsNone(specs["shadowsocks"]["tls"])
+
+    def test_tuic_uses_dedicated_tls(self):
+        """TUIC 必须用带 alpn h3 的独立 TLS 对象，共用 LE 会报 no ALPN。"""
+        specs = {s["type"]: s for s in self._with("T4", TUIC_PORT=8443)}
+        self.assertEqual(specs["tuic"]["tls"], "tuic")
+
+    def test_explicit_blank_means_off(self):
+        """显式留空 = 关掉（现在键不存在也关，两种写法结果一致）。"""
+        for kw in ({"REALITY_PORT": ""}, {"SS_PORT": ""}, {"TUIC_PORT": ""}):
+            self.assertEqual(len(self._with("T5", **kw)), 2, kw)
 
     def test_no_443(self):
         """443 被针对性干扰，任何节点都不该用 443。"""
-        for s in self.specs:
+        for s in self._with("T6", REALITY_PORT=2053, SS_PORT=2087, TUIC_PORT=8443):
             self.assertNotEqual(s["port"], 443, "%s 不该用 443" % s["tag"])
 
     def test_ports_unique_per_transport(self):
         """同号端口只允许出现在不同传输层（如 8443/tcp 与 8443/udp）。"""
-        tcp = [s["port"] for s in self.specs
+        specs = self._with("T7", REALITY_PORT=2053, SS_PORT=2087, TUIC_PORT=8443)
+        tcp = [s["port"] for s in specs
                if s["type"] in ("anytls", "vless", "shadowsocks")]
-        udp = [s["port"] for s in self.specs if s["type"] in ("tuic", "hysteria2")]
+        udp = [s["port"] for s in specs if s["type"] in ("tuic", "hysteria2")]
         self.assertEqual(len(tcp), len(set(tcp)))
         self.assertEqual(len(udp), len(set(udp)))
 
-    def test_tuic_uses_dedicated_tls(self):
-        """TUIC 必须用带 alpn h3 的独立 TLS 对象，共用 LE 会报 no ALPN。"""
-        specs = {s["type"]: s for s in deploy_nodes.node_specs(
-            {"DOMAIN": "example.com", "NODE_PREFIX": "T4", "TUIC_PORT": "8443"})}
-        self.assertEqual(specs["tuic"]["tls"], "tuic")
-
-    def test_shadowsocks_has_no_tls(self):
-        """SS 自己就是加密协议，不该挂 TLS 对象。"""
-        self.assertIsNone(self.by_type["shadowsocks"]["tls"])
-
-    def test_reality_has_vision_flow(self):
-        self.assertEqual(self.by_type["vless"]["out_extra"].get("flow"), "xtls-rprx-vision")
-
     def test_ports_overridable(self):
-        cfg = {"DOMAIN": "x.com", "NODE_PREFIX": "T5",
-               "ANYTLS_PORT": "9443", "REALITY_PORT": "2443"}
-        specs = {s["type"]: s for s in deploy_nodes.node_specs(cfg)}
+        specs = {s["type"]: s for s in self._with(
+            "T8", ANYTLS_PORT=9443, REALITY_PORT=2443)}
         self.assertEqual(specs["anytls"]["port"], 9443)
         self.assertEqual(specs["vless"]["port"], 2443)
 
     def test_specs_cached_per_config(self):
         """同一配置两次调用必须拿到同一把 SS psk，否则入站与客户端凭据对不上。"""
-        cfg = {"DOMAIN": "example.com", "NODE_PREFIX": "T6"}
+        cfg = {"DOMAIN": "example.com", "NODE_PREFIX": "T9", "SS_PORT": "2087"}
         a = [s for s in deploy_nodes.node_specs(cfg) if s["type"] == "shadowsocks"][0]
         b = [s for s in deploy_nodes.node_specs(cfg) if s["type"] == "shadowsocks"][0]
         self.assertEqual(a["out_extra"]["password"], b["out_extra"]["password"])
