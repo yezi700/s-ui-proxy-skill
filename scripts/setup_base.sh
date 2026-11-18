@@ -25,7 +25,8 @@ ANYTLS_PORT="${ANYTLS_PORT:-8443}"
 # 注意用的是 ${VAR-默认} 而不是 ${VAR:-默认}：带冒号的写法会把「显式留空」
 # 当成未设置、又填回默认值，那就没法关掉了。
 TUIC_PORT="${TUIC_PORT-}"
-REALITY_PORT="${REALITY_PORT:-2053}"
+# Reality 留空 = 不部署（3 个 RTT，丢包线路上最慢；只要 Hy2+AnyTLS 时可以关掉）
+REALITY_PORT="${REALITY_PORT-}"
 HY2_PORT="${HY2_PORT:-2083}"
 # Shadowsocks 端口。⚠️ SS 入站默认带 UDP relay，sing-box 会同时监听 tcp+udp，
 # 只放行 tcp 会让 udp 那个 socket 白开着、静默丢包。留空 = 不部署 SS。
@@ -41,6 +42,10 @@ DNS_SERVERS="${DNS_SERVERS:-8.8.8.8 8.8.4.4 1.1.1.1}"
 EXTRA_V4=""
 [ -n "${TUIC_PORT}" ] && EXTRA_V4="${EXTRA_V4}-A INPUT -p udp -m udp --dport ${TUIC_PORT} -j ACCEPT
 "
+if [ -n "${REALITY_PORT}" ]; then
+  EXTRA_V4="${EXTRA_V4}-A INPUT -p tcp -m tcp --dport ${REALITY_PORT} -j ACCEPT
+"
+fi
 if [ -n "${SS_PORT}" ]; then
   EXTRA_V4="${EXTRA_V4}-A INPUT -p tcp -m tcp --dport ${SS_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${SS_PORT} -j ACCEPT
@@ -56,7 +61,7 @@ PANEL_PORT      = ${PANEL_PORT}
 SUB_PORT        = ${SUB_PORT}
 ANYTLS_PORT     = ${ANYTLS_PORT} (tcp)
 TUIC_PORT       = ${TUIC_PORT:-<未启用>} (udp)
-REALITY_PORT    = ${REALITY_PORT} (tcp)
+REALITY_PORT    = ${REALITY_PORT:-<未启用>} (tcp)
 HY2_PORT        = ${HY2_PORT} (udp)
 SS_PORT         = ${SS_PORT:-<未启用>} (tcp+udp)
 HY2_HOP_RANGE   = ${HY2_HOP_RANGE} (udp)
@@ -103,7 +108,6 @@ cat > /etc/iptables/rules.v4 <<EOF
 -A INPUT -p tcp -m tcp --dport ${SSH_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${ACME_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${ANYTLS_PORT} -j ACCEPT
--A INPUT -p tcp -m tcp --dport ${REALITY_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_HOP_RANGE} -j ACCEPT
 ${EXTRA_V4}
@@ -147,7 +151,6 @@ cat > /etc/iptables/rules.v6 <<EOF
 -A INPUT -p tcp -m tcp --dport ${SSH_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${ACME_PORT} -j ACCEPT
 -A INPUT -p tcp -m tcp --dport ${ANYTLS_PORT} -j ACCEPT
--A INPUT -p tcp -m tcp --dport ${REALITY_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_PORT} -j ACCEPT
 -A INPUT -p udp -m udp --dport ${HY2_HOP_RANGE} -j ACCEPT
 ${EXTRA_V4}
@@ -247,6 +250,11 @@ net.core.wmem_max = 16777216
 net.ipv4.tcp_rmem = 4096 87380 16777216
 net.ipv4.tcp_wmem = 4096 65536 16777216
 fs.file-max = 1000000
+# 跨境线路常见 PMTUD 黑洞：中途设备丢 ICMP frag-needed 时，大包会被静默丢弃，
+# 表现是「握手卡 1~3 秒甚至超时」。开着探测能让内核自己把 MSS 降下来。
+net.ipv4.tcp_mtu_probing = 1
+# 空闲后不清零 cwnd：代理场景下连接是一阵一阵的，清空后每个新请求都要重新慢启动
+net.ipv4.tcp_slow_start_after_idle = 0
 EOF
 sysctl --system >/dev/null 2>&1
 

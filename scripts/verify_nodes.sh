@@ -22,7 +22,7 @@ TUIC_PORT="${TUIC_PORT-}"           # 留空 = 不检查（默认不部署 TUIC�
 SS_PORT="${SS_PORT-2087}"           # 留空 = 不检查
 HY2_PORT="${HY2_PORT:-2083}"
 HY2_HOP_RANGE="${HY2_HOP_RANGE-58888:60888}"   # 留空 = 不检查端口跳跃
-REALITY_PORT="${REALITY_PORT:-2053}"
+REALITY_PORT="${REALITY_PORT-}"     # 留空 = 不检查（未部署 Reality）
 PANEL_USER="${PANEL_USER:-admin}"
 PANEL_PASS="${PANEL_PASS:-}"
 
@@ -69,7 +69,7 @@ check_listen tcp "$SUB_PORT"     "订阅"
 check_listen tcp "$ANYTLS_PORT"  "AnyTLS"
 [ -n "$TUIC_PORT" ] && check_listen udp "$TUIC_PORT" "TUIC"
 check_listen udp "$HY2_PORT"     "Hysteria2"
-check_listen tcp "$REALITY_PORT" "Reality"
+[ -n "$REALITY_PORT" ] && check_listen tcp "$REALITY_PORT" "Reality"
 if [ -n "$SS_PORT" ]; then
   # SS 入站默认带 UDP relay，sing-box 会同时监听 tcp 和 udp；
   # 两个都要在，否则客户端开 UDP 转发会静默失败

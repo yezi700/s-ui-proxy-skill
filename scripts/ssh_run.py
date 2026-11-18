@@ -176,10 +176,13 @@ def env_prefix(cfg: dict) -> str:
     """
     parts = []
     for key, val in cfg.items():
-        if not key or not isinstance(val, str) or not val:
+        if not key or not isinstance(val, str):
             continue
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             continue
+        # ⚠️ 空值也要导出：`REALITY_PORT=` / `SS_PORT=` 的语义是「显式关掉这个节点」，
+        #    如果这里跳过空值，远端看到的是「未设置」→ 又填回默认端口，
+        #    于是关不掉（踩过一次：dry-run 里 Reality 又冒出来了）。
         parts.append(f"{key}={shlex.quote(val)}")
     return "env " + " ".join(parts) if parts else ""
 

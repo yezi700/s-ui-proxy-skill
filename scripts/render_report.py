@@ -374,15 +374,15 @@ def render_md(d: dict) -> str:
         A("")
         A("三条读法：")
         A("")
-        A("1. **延迟差异是稳定可复现的，吞吐不是。** 延迟排序三轮完全一致；"
-          "吞吐同一节点三次能差一倍（AnyTLS 72/87/108、Reality 53/80），"
-          "波动大于节点之间的差异 —— **不要按吞吐选节点**。")
+        A("1. **延迟差异相对可复现，吞吐不是。** 同一节点重复测，吞吐波动常常大于"
+          "节点之间的差异 —— **不要按吞吐选节点**。")
         A("2. **延迟差异来自连接复用，不是协议快慢。** AnyTLS 和 Hysteria2 在客户端侧"
           "有连接池，一个请求只付 1 个 RTT；Shadowsocks 每次新建 TCP（2 RTT）；"
-          "Reality 还要再做一次 TLS 握手（3 RTT）。实测 616 ÷ 205 ≈ 3、348 ÷ 205 ≈ 1.7，"
-          "和 RTT 数对得上。所以「SS 没握手所以最快」是错的。")
-        A("3. **短窗口那一列会低估 3~4 倍**（前几秒还在 TCP 慢启动）。"
-          "上一版就是被这一列带偏，得出了「三轮第一名各不相同」的错误结论。")
+          "Reality 还要再做一次 TLS 握手（3 RTT）。所以 Reality 的延迟通常是 AnyTLS 的"
+          "几倍，这是握手 RTT 数决定的，不是节点坏了。")
+        if has_short:
+            A("3. **短窗口那一列会低估 3~4 倍**（前几秒还在 TCP 慢启动），"
+              "只看「持续吞吐」那一列。")
         A("")
         if m.get("removed"):
             A("已下线的节点：")
@@ -623,16 +623,15 @@ def render_html(d: dict) -> str:
         if m.get("note"):
             parts.append('<p style="color:var(--mute);margin:6px 0 0">%s</p>' % esc(m["note"]))
         parts.append('</div>')
-        parts.append('<div class="note"><b>延迟差异是稳定可复现的，吞吐不是。</b>'
-                     '延迟排序三轮完全一致；吞吐同一节点三次能差一倍'
-                     '（AnyTLS 72/87/108、Reality 53/80），波动大于节点之间的差异 —— '
-                     '<b>不要按吞吐选节点</b>。<br>'
-                     '<b>延迟差异来自连接复用，不是协议快慢。</b>'
-                     'AnyTLS 和 Hysteria2 在客户端侧有连接池，一个请求只付 1 个 RTT；'
-                     'Shadowsocks 每次新建 TCP（2 RTT）；Reality 还要再做一次 TLS 握手（3 RTT）。'
-                     '实测 616 ÷ 205 ≈ 3、348 ÷ 205 ≈ 1.7，和 RTT 数对得上 —— '
-                     '所以「SS 没握手所以最快」是错的。<br>'
-                     '最右那列是 6 秒窗口，<b>会低估 3~4 倍</b>（TCP 慢启动），只作对照。</div>')
+        note = ('<div class="note"><b>延迟差异相对可复现，吞吐不是。</b>'
+                '同一节点重复测，吞吐波动常常大于节点之间的差异 —— <b>不要按吞吐选节点</b>。<br>'
+                '<b>延迟差异来自连接复用，不是协议快慢。</b>'
+                'AnyTLS 和 Hysteria2 在客户端侧有连接池，一个请求只付 1 个 RTT；'
+                'Shadowsocks 每次新建 TCP（2 RTT）；Reality 还要再做一次 TLS 握手（3 RTT）。'
+                '所以 Reality 的延迟通常是 AnyTLS 的几倍，这是握手 RTT 数决定的，不是节点坏了。')
+        if has_short:
+            note += '<br>最右那列是 6 秒窗口，<b>会低估 3~4 倍</b>（TCP 慢启动），只作对照。'
+        parts.append(note + '</div>')
         if m.get("removed"):
             parts.append('<h2>已下线节点</h2><div class="card"><ul>%s</ul></div>'
                          % "".join('<li><code>%s</code> —— %s</li>' % (esc(t), esc(w))

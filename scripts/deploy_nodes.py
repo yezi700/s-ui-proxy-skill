@@ -160,15 +160,15 @@ def node_specs(cfg: dict) -> list:
     prefix = (cfg.get("NODE_PREFIX") or "US").strip().upper() or "US"
     anytls_port = int(cfg.get("ANYTLS_PORT") or 8443)
     hy2_port = int(cfg.get("HY2_PORT") or 2083)
-    reality_port = int(cfg.get("REALITY_PORT") or 2053)
-    # 键不存在时用默认值；**显式留空**（TUIC_PORT= / SS_PORT=）表示关掉这个节点。
+    # 键不存在时用默认值；**显式留空**（REALITY_PORT= / SS_PORT= / TUIC_PORT=）表示关掉这个节点。
     # 所以不能用 `or 默认值` —— 那样空字符串会被当成「没设置」又填回默认。
     def _opt(key, default):
         raw = cfg.get(key)
         return default if raw is None else int(raw or 0)
 
-    tuic_port = _opt("TUIC_PORT", 0)      # 默认关（§6.8）
-    ss_port = _opt("SS_PORT", 2087)       # 默认开
+    reality_port = _opt("REALITY_PORT", 2053)   # 默认开；丢包线路可以关掉
+    tuic_port = _opt("TUIC_PORT", 0)            # 默认关（§6.8）
+    ss_port = _opt("SS_PORT", 2087)             # 默认开
 
     specs = [
         {
@@ -185,14 +185,18 @@ def node_specs(cfg: dict) -> list:
             "tls": "le",
             "out_extra": {},
         },
-        {
+    ]
+
+    if reality_port:
+        # 3 个 RTT（TCP + TLS + 请求），在丢包线路上永远垫底；
+        # 只在需要「抗主动探测 / 不依赖域名」时才留，纯提速场景可以留空关掉。
+        specs.append({
             "tag": "%s-Reality-%d" % (prefix, reality_port),
             "type": "vless",
             "port": reality_port,
             "tls": "reality",
             "out_extra": {"flow": "xtls-rprx-vision"},
-        },
-    ]
+        })
 
     if ss_port:
         method = cfg.get("SS_METHOD") or "2022-blake3-aes-128-gcm"
@@ -270,43 +274,48 @@ def deploy(cfg: dict, dry_run: bool = False) -> int:
         )
 
     # 1c. Reality —— 优先复用已有对象里的密钥，避免重复运行时凭据"漂移"
+    #      REALITY_PORT 留空 = 不部署，连 TLS 对象都不建（避免留孤儿）
     reality_name = "reality-" + domain
-    exist_rt = tls_by_name.get(reality_name)
-    if exist_rt:
-        srv = exist_rt.get("server") or {}
-        cli_ = exist_rt.get("client") or {}
-        rt_srv = srv.get("reality") or {}
-        rt_cli = cli_.get("reality") or {}
-        priv = rt_srv.get("private_key") or ""
-        pub = rt_cli.get("public_key") or ""
-        sids = rt_srv.get("short_id") or []
-        sid = sids[0] if sids else ""
-        sni = srv.get("server_name") or sni
-        print("[reality] 复用已有对象 (id=%s)  pub=%s..." % (exist_rt["id"], pub[:12]))
-    else:
-        priv = cfg.get("REALITY_PRIV") or ""
-        pub = cfg.get("REALITY_PUB") or ""
-        sid = cfg.get("REALITY_SID") or ""
-        if not (priv and pub and sid):
-            priv, pub = gen_x25519()
-            sid = short_id()
-            print("[reality] 已生成新密钥对  pub=%s...  sid=%s" % (pub[:12], sid))
+    tls_reality = None
+    if any(s["tls"] == "reality" for s in node_specs(cfg)):
+        exist_rt = tls_by_name.get(reality_name)
+        if exist_rt:
+            srv = exist_rt.get("server") or {}
+            cli_ = exist_rt.get("client") or {}
+            rt_srv = srv.get("reality") or {}
+            rt_cli = cli_.get("reality") or {}
+            priv = rt_srv.get("private_key") or ""
+            pub = rt_cli.get("public_key") or ""
+            sids = rt_srv.get("short_id") or []
+            sid = sids[0] if sids else ""
+            sni = srv.get("server_name") or sni
+            print("[reality] 复用已有对象 (id=%s)  pub=%s..." % (exist_rt["id"], pub[:12]))
+        else:
+            priv = cfg.get("REALITY_PRIV") or ""
+            pub = cfg.get("REALITY_PUB") or ""
+            sid = cfg.get("REALITY_SID") or ""
+            if not (priv and pub and sid):
+                priv, pub = gen_x25519()
+                sid = short_id()
+                print("[reality] 已生成新密钥对  pub=%s...  sid=%s" % (pub[:12], sid))
 
-    reality_server = {
-        "enabled": True, "server_name": sni,
-        "reality": {
-            "enabled": True,
-            "handshake": {"server": sni, "server_port": 443},
-            "private_key": priv,
-            "short_id": [sid],
-        },
-    }
-    reality_client = {
-        "enabled": True, "server_name": sni,
-        "utls": {"enabled": True, "fingerprint": "chrome"},
-        "reality": {"enabled": True, "public_key": pub, "short_id": sid},
-    }
-    tls_reality = ensure_tls(reality_name, reality_server, reality_client)
+        reality_server = {
+            "enabled": True, "server_name": sni,
+            "reality": {
+                "enabled": True,
+                "handshake": {"server": sni, "server_port": 443},
+                "private_key": priv,
+                "short_id": [sid],
+            },
+        }
+        reality_client = {
+            "enabled": True, "server_name": sni,
+            "utls": {"enabled": True, "fingerprint": "chrome"},
+            "reality": {"enabled": True, "public_key": pub, "short_id": sid},
+        }
+        tls_reality = ensure_tls(reality_name, reality_server, reality_client)
+    else:
+        print("[reality] REALITY_PORT 留空，跳过 Reality 节点")
 
     tls_map = {"le": tls_le, "tuic": tls_tuic, "reality": tls_reality, None: None}
 
@@ -362,11 +371,14 @@ def deploy(cfg: dict, dry_run: bool = False) -> int:
 
     config = {
         "anytls": {"name": sub_id, "password": cfg.get("ANYTLS_PASSWORD") or gen_password()},
-        "vless": {"name": sub_id,
-                  "uuid": cfg.get("REALITY_UUID") or str(uuidlib.uuid4()),
-                  "flow": "xtls-rprx-vision"},
         "hysteria2": {"name": sub_id, "password": cfg.get("HY2_PASSWORD") or gen_password()},
     }
+    # 只有真的建了 Reality 才往客户端配置里写 vless —— 多写一条会在订阅里
+    # 生成一个没有入站承接的死节点（pitfalls §3.11）
+    if any(s["type"] == "vless" for s in specs):
+        config["vless"] = {"name": sub_id,
+                           "uuid": cfg.get("REALITY_UUID") or str(uuidlib.uuid4()),
+                           "flow": "xtls-rprx-vision"}
 
     ss_spec = next((s for s in specs if s["type"] == "shadowsocks"), None)
     if ss_spec:
@@ -434,8 +446,15 @@ def deploy(cfg: dict, dry_run: bool = False) -> int:
         parts = ["%s=%s" % (k, v) for k, v in cred.items() if k != "name"]
         print("  %-10s %s" % (proto, "  ".join(parts)))
     print("")
-    print("  Reality  SNI=%s  pbk=%s" % (sni, pub))
-    print("  Reality  sid=%s" % sid)
+    if tls_reality is not None:
+        rt_srv = (tls_reality.get("server") or {}).get("reality") or {}
+        rt_cli = (tls_reality.get("client") or {}).get("reality") or {}
+        print("  Reality  SNI=%s  pbk=%s" % (
+            (tls_reality.get("server") or {}).get("server_name"),
+            rt_cli.get("public_key")))
+        print("  Reality  sid=%s" % ((rt_srv.get("short_id") or [""])[0]))
+    else:
+        print("  Reality  未部署（REALITY_PORT 留空）")
     print("=" * 62)
 
     if not dry_run:
