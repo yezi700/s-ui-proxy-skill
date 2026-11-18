@@ -115,6 +115,7 @@ python scripts/ssh_run.py -f scripts/setup_base.sh
 python scripts/ssh_run.py -f scripts/install_sui.sh
 python scripts/deploy_nodes.py
 python scripts/ssh_run.py -f scripts/verify_nodes.sh
+python scripts/check_ports.py          # 从本机确认端口可达
 python scripts/render_report.py -o .
 ```
 
@@ -126,11 +127,13 @@ python scripts/render_report.py -o .
 ├── SKILL.md                          # 完整工作流（给 agent 读的）
 ├── scripts/
 │   ├── check_dns.py                  # DNS 只读预检
+│   ├── check_ports.py                # 端口体检（从本机探测）
 │   ├── ssh_run.py                    # 通用 SSH 执行器
 │   ├── sui_api.py                    # 面板 API 客户端
 │   ├── setup_base.sh                 # 系统基线 + iptables + BBR
 │   ├── install_sui.sh                # 安装 + ACME 证书
 │   ├── deploy_nodes.py               # 创建入站 + 订阅用户
+│   ├── rotate_port.py                # 一键换端口
 │   ├── verify_nodes.sh               # 端到端验证（17 项，含端口跳跃）
 │   ├── bench_nodes.py                # 本机拨测：延迟 + 100MB 持续吞吐
 │   └── render_report.py              # 交付文档生成
@@ -145,6 +148,27 @@ python scripts/render_report.py -o .
 │   └── test_dns.py
 └── examples/deploy.env.example
 ```
+
+## 端口会失效，要定期体检
+
+端口不是配好就永久有效。同一台机器间隔 11 天：
+
+| 端口 | 11-07 | 11-18 |
+|---|---|---|
+| 8443/tcp (AnyTLS) | 3/3 | 3/3 |
+| 2083/udp (Hysteria2) | 3/3 | 3/3 |
+| 2053/tcp (Reality) | 3/3 | **0/3，TCP 握手全超时** |
+
+2053 失效时服务端仍在监听、iptables 也放行、日志里一条连接记录都没有 ——
+纯粹是链路中间被阻断。这时候改协议、改证书、重装面板全是白费。
+
+```bash
+python scripts/check_ports.py                    # 体检
+python scripts/rotate_port.py --node reality     # 换端口
+python scripts/rotate_port.py --list             # 看候选池
+```
+
+失效端口记进 `deploy.env` 的 `DEAD_PORTS`，轮换时会自动跳过。
 
 ## 客户端兼容性
 

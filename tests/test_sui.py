@@ -332,6 +332,67 @@ class TestSuiApi(unittest.TestCase):
         self.assertEqual(captured["data"]["subPort"], "2096")
 
 
+# ---------------------------------------------------------------- 端口轮换
+
+class TestPortRotation(unittest.TestCase):
+    """端口会随时间被逐个封锁，体检与轮换是长期维护的一部分。"""
+
+    def setUp(self):
+        import check_ports
+        import rotate_port
+        self.cp = check_ports
+        self.rp = rotate_port
+
+    def test_dead_ports_parsed(self):
+        self.assertEqual(self.rp.dead_ports({"DEAD_PORTS": "443,2053"}), {443, 2053})
+
+    def test_dead_ports_tolerates_noise(self):
+        cfg = {"DEAD_PORTS": " 443 , abc , 2053 ,, "}
+        self.assertEqual(self.rp.dead_ports(cfg), {443, 2053})
+
+    def test_dead_ports_empty(self):
+        self.assertEqual(self.rp.dead_ports({}), set())
+
+    def test_no_443_in_pools(self):
+        """443 实测被针对性干扰，候选池里不该出现。"""
+        self.assertNotIn(443, self.rp.TCP_POOL)
+        self.assertNotIn(443, self.rp.UDP_POOL)
+
+    def test_pools_are_standard_ports(self):
+        """候选池应是标准 HTTPS/QUIC 端口，不要野鸡高位端口。"""
+        standard = {80, 443, 2052, 2053, 2082, 2083, 2086, 2087,
+                    2095, 2096, 8080, 8443, 8880, 9443}
+        for port in self.rp.TCP_POOL + self.rp.UDP_POOL:
+            self.assertIn(port, standard, "%d 不是标准端口" % port)
+
+    def test_node_map_covers_all_deployable_nodes(self):
+        """每个可能部署的节点都要能换端口。"""
+        keys = {v[0] for v in self.rp.NODE_MAP.values()}
+        for need in ("ANYTLS_PORT", "HY2_PORT", "REALITY_PORT", "SS_PORT"):
+            self.assertIn(need, keys)
+
+    def test_node_map_transport_matches_protocol(self):
+        proto = {v[2]: v[1] for v in self.rp.NODE_MAP.values()}
+        self.assertEqual(proto["anytls"], "tcp")
+        self.assertEqual(proto["vless"], "tcp")
+        self.assertEqual(proto["shadowsocks"], "tcp")
+        self.assertEqual(proto["hysteria2"], "udp")
+        self.assertEqual(proto["tuic"], "udp")
+
+    def test_check_ports_specs_cover_all_nodes(self):
+        keys = {k for k, _, _ in self.cp.PORT_SPECS}
+        for need in ("ANYTLS_PORT", "REALITY_PORT", "SS_PORT"):
+            self.assertIn(need, keys)
+
+    def test_check_ports_marks_udp(self):
+        """UDP 端口必须标 udp，否则会被 TCP 探测误判成 REFUSED。"""
+        proto = {k: p for k, _, p in self.cp.PORT_SPECS}
+        self.assertEqual(proto["TUIC_PORT"], "udp")
+        self.assertEqual(proto["HY2_PORT"], "udp")
+        self.assertEqual(proto["ANYTLS_PORT"], "tcp")
+        self.assertEqual(proto["SS_PORT"], "tcp")
+
+
 # ---------------------------------------------------------------- 文档一致性
 
 def _md_headings(text):

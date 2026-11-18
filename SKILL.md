@@ -225,6 +225,10 @@ python scripts/bench_nodes.py --sub ... --mihomo ... --size 0
 
 ```bash
 python scripts/render_report.py -o .
+
+# 之后定期体检，端口失效就轮换
+python scripts/check_ports.py
+python scripts/rotate_port.py --node <节点>
 ```
 
 生成 `VPS-<域名>-部署信息.md` 与 `.html`（带复制按钮），数据全部来自实测回读。
@@ -244,36 +248,71 @@ python scripts/render_report.py -o .
 
 只写一半的话，用 Xray 内核的人会以为节点全挂了。详见 `references/pitfalls.md` §6。
 
+### Step 8 · 端口维护（长期）
+
+**端口不是配好就永久有效。** 实测同一台机器间隔 11 天：
+
+| 端口 | 11-07 | 11-18 |
+|---|---|---|
+| 8443/tcp (AnyTLS) | 3/3 | 3/3 |
+| 2083/udp (Hysteria2) | 3/3 | 3/3 |
+| 2053/tcp (Reality) | 3/3 | **0/3，TCP 握手全超时** |
+
+2053 失效时服务端仍在监听、iptables 也放行、日志里连一条连接记录都没有 ——
+纯粹是链路中间被阻断。这时改协议、改证书、重装面板全是白费。
+
+```bash
+python scripts/check_ports.py                 # 体检（必须在本机跑）
+python scripts/rotate_port.py --node reality  # 换端口
+python scripts/rotate_port.py --list          # 看候选池
+```
+
+**先分层，再动手：**
+
+| 现象 | 含义 | 动作 |
+|---|---|---|
+| TCP 握手超时 | 端口被阻断 | 换端口 |
+| TCP 能连但协议报错 | 协议或配置问题 | 别换端口，查 pitfalls §3 / §4 |
+| TCP REFUSED | 服务没监听 | `journalctl -u s-ui` |
+| UDP 端口 TCP 探测 REFUSED | 正常现象 | 只能用真实客户端测 |
+
+**失效端口要记账**：写进 `deploy.env` 的 `DEAD_PORTS`（逗号分隔），
+`rotate_port.py` 自动跳过。被封的端口在服务端看起来完全正常，脚本判断不了，只能人工维护。
+
 ## 关键约束
 
 1. **所有节点避开 443**（见上）。用户坚持要 443 时，先做对照实验说明风险。
-2. **TUIC 默认不部署**：实测在部分线路上被限速到 0.2~0.4 Mbps，换端口换客户端都一样
+2. **端口有生命周期**。配好不等于永久有效，定期 `check_ports.py` 体检，
+   失效就 `rotate_port.py` 换，并把旧端口记进 `DEAD_PORTS`。
+3. **排查"连不上"先分层**：TCP 超时＝端口被阻断（换端口）；
+   TCP 通但协议报错＝配置或协议问题（别换端口）。
+4. **TUIC 默认不部署**：实测在部分线路上被限速到 0.2~0.4 Mbps，换端口换客户端都一样
    （pitfalls §6.8）。要开就把 `TUIC_PORT` 填上，且**必须用独立 TLS 对象带 `alpn:["h3"]`**，
    与 AnyTLS 共用会报 `tls: server did not select an ALPN protocol`。
-3. **保存 clients 必须带 `"links":[]` 和 `inbounds`**，否则报
+5. **保存 clients 必须带 `"links":[]` 和 `inbounds`**，否则报
    `save: unexpected end of JSON input`（Go 侧对 nil 做 Unmarshal，报错完全误导）。
-4. **`GET /api/clients` 不返回 `config`**，edit 前必须从 DB 补全，否则凭据被清空，
+6. **`GET /api/clients` 不返回 `config`**，edit 前必须从 DB 补全，否则凭据被清空，
    随后报 `converting NULL to string is unsupported`。
-5. **改 `webPort` / `webPath` / `webCertFile` 后必须 `systemctl restart s-ui`** ——
+7. **改 `webPort` / `webPath` / `webCertFile` 后必须 `systemctl restart s-ui`** ——
    S-UI 不会自动重启，settings 已经写进 DB 了，极易误判成"改了没生效"。
-6. **前端 API 必须带 `Origin` 头**，否则 CSRF 拦成 403 且响应体为空。
-7. **访问面板要用域名**（或 `curl --resolve` 钉到 127.0.0.1）。直接用 127.0.0.1 会因
+8. **前端 API 必须带 `Origin` 头**，否则 CSRF 拦成 403 且响应体为空。
+9. **访问面板要用域名**（或 `curl --resolve` 钉到 127.0.0.1）。直接用 127.0.0.1 会因
    SNI 不匹配被拒：`tls: unrecognized server name`。
-8. **不要删 `/root/cert/`** —— 面板、订阅、AnyTLS、Hysteria2 共用（SS 和 Reality 不用）。
-9. **新增入站 sing-box 会自动热加载**，不需要重启；但改面板自身的端口/路径要重启。
-10. **不要用 `pkill -f` / `pgrep -f` 匹配自己的脚本**（会匹配到脚本自身命令行导致自杀）。
-11. **删入站要连 `clients.config` 一起清**，否则订阅里继续生成死节点（pitfalls §3.11）。
+10. **不要删 `/root/cert/`** —— 面板、订阅、AnyTLS、Hysteria2 共用（SS 和 Reality 不用）。
+11. **新增入站 sing-box 会自动热加载**，不需要重启；但改面板自身的端口/路径要重启。
+12. **不要用 `pkill -f` / `pgrep -f` 匹配自己的脚本**（会匹配到脚本自身命令行导致自杀）。
+13. **删入站要连 `clients.config` 一起清**，否则订阅里继续生成死节点（pitfalls §3.11）。
    删入站的 `del` 传的是 **tag 字符串**，不是 id（pitfalls §3.5）。
-12. **SS2022 的客户端 config 键是 `shadowsocks16`**，服务端 `options` 必须同时有
+14. **SS2022 的客户端 config 键是 `shadowsocks16`**，服务端 `options` 必须同时有
    `method` 和 `password`，否则核心整个起不来（pitfalls §6.9）。
-13. **端口跳跃的客户端配置订阅不会带**：服务端 REDIRECT 一段 UDP 端口只是准备好，
+15. **端口跳跃的客户端配置订阅不会带**：服务端 REDIRECT 一段 UDP 端口只是准备好，
    客户端还得手动加 `ports`（mihomo）/ `server_ports`（sing-box）才生效（pitfalls §6.10）。
-14. **不要部署 naive 入站**：S-UI 会把它写进 sing-box JSON 订阅，而官方 sing-box
+16. **不要部署 naive 入站**：S-UI 会把它写进 sing-box JSON 订阅，而官方 sing-box
    客户端没编译 `with_naive_outbound`，遇到 `type: naive` **整份订阅报错**（pitfalls §6.11）。
-15. **测吞吐必须跑满大文件**：6 秒窗口量到的是 TCP 慢启动，会把带宽低估 3~4 倍
+17. **测吞吐必须跑满大文件**：6 秒窗口量到的是 TCP 慢启动，会把带宽低估 3~4 倍
    （20~26 Mbps vs 实际的 53~108 Mbps）。而且吞吐波动大于节点之间的差异，
    **选节点只看延迟，别看吞吐**（§1.6）。
-16. 涉及删除、覆盖、改端口等破坏性操作前，先向用户说明并取得确认。
+18. 涉及删除、覆盖、改端口等破坏性操作前，先向用户说明并取得确认。
 
 ## 排查入口
 
@@ -292,6 +331,7 @@ references/pitfalls.md  →  开头的「症状速查」表格
 |---|---|
 | 能连但极慢（几百 KB/s） | 换端口做对照实验；QUIC 系节点换 TCP 系验证（pitfalls §6.8） |
 | 全部节点突然不通 | 换端口重试 —— 大概率是端口被干扰，不是协议失效（§1.1） |
+| 某个端口昨天还好今天全超时 | 端口被逐步封锁，`check_ports.py` 确认后轮换（§1.5） |
 | 只有一个节点连不上 | 先问客户端内核，再看兼容性矩阵（§6.1） |
 
 **不要一上来就重装面板或换协议。** 先做对照实验定位层次。
@@ -313,11 +353,13 @@ references/pitfalls.md  →  开头的「症状速查」表格
 | 脚本 | 作用 |
 |---|---|
 | `scripts/check_dns.py` | 只读检查公共 DNS 的 A/AAAA 是否符合预期 |
+| `scripts/check_ports.py` | **从本机**探测各端口可达性（端口会失效，需定期跑） |
 | `scripts/ssh_run.py` | 通用 SSH 执行器（跑单条命令或整个脚本，自动注入 deploy.env） |
 | `scripts/sui_api.py` | 面板 API 客户端（Cookie 认证 + Origin 头；也可当 CLI 用） |
 | `scripts/setup_base.sh` | 系统基线：时区、依赖、iptables 白名单、屏蔽 IPv6、BBR |
 | `scripts/install_sui.sh` | 非交互安装 S-UI + ACME 证书 + 改默认密码（改完自动回读验证） |
 | `scripts/deploy_nodes.py` | 创建入站 + 订阅用户（幂等；默认 4 个节点，TUIC/SS 可关） |
+| `scripts/rotate_port.py` | 一键给节点换端口（改入站 + 放行防火墙 + 验证监听） |
 | `scripts/verify_nodes.sh` | 端到端验证（17 项检查，含端口跳跃规则；明确标注验证不了防火墙） |
 | `scripts/bench_nodes.py` | 本机真机拨测：按订阅逐个节点量延迟 + 100MB 持续吞吐 |
 | `scripts/render_report.py` | 生成交付文档 `.md` / `.html`（数据实测回读，可选带实测记录） |
@@ -339,6 +381,10 @@ python scripts/deploy_nodes.py
 python scripts/ssh_run.py -f scripts/verify_nodes.sh
 # 本机用真实客户端逐个节点拨测
 python scripts/render_report.py -o .
+
+# 之后定期体检，端口失效就轮换
+python scripts/check_ports.py
+python scripts/rotate_port.py --node <节点>
 ```
 
 ## 从 3x-ui 迁移
