@@ -168,6 +168,16 @@ python scripts/rotate_port.py --node reality     # 换端口
 python scripts/rotate_port.py --list             # 看候选池
 ```
 
+体检会**同时查外部和服务端**，直接给结论。因为「端口被封」和「防火墙没放行」
+从外部看都是超时，但前者要换端口、后者补一条 iptables 就好：
+
+| 诊断 | 含义 | 动作 |
+|---|---|---|
+| 端口被封锁 | 服务端在听、防火墙也放行，但外部连不上 | 换端口 |
+| 防火墙未放行 | 服务端在听，但 iptables 缺规则 | 补规则，几秒钟 |
+| 服务未监听 | 没有进程在听 | `journalctl -u s-ui` |
+| 需客户端验证 | UDP 端口，TCP 探测无意义 | `bench_nodes.py` |
+
 失效端口记进 `deploy.env` 的 `DEAD_PORTS`，轮换时会自动跳过。
 
 ## 客户端兼容性

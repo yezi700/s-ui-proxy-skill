@@ -263,18 +263,23 @@ python scripts/rotate_port.py --node <节点>
 
 ```bash
 python scripts/check_ports.py                 # 体检（必须在本机跑）
-python scripts/rotate_port.py --node reality  # 换端口
+python scripts/check_ports.py --no-ssh        # 只做外部探测，不依赖 paramiko
+python scripts/rotate_port.py --node reality  # 换端口（换完自动从外部验证）
 python scripts/rotate_port.py --list          # 看候选池
 ```
 
-**先分层，再动手：**
+**体检会同时查外部和内部，直接给结论** —— 因为「端口被封」和「防火墙没放行」
+从外部看都是超时，但处理方式完全不同：
 
-| 现象 | 含义 | 动作 |
+| 诊断列 | 含义 | 动作 |
 |---|---|---|
-| TCP 握手超时 | 端口被阻断 | 换端口 |
-| TCP 能连但协议报错 | 协议或配置问题 | 别换端口，查 pitfalls §3 / §4 |
-| TCP REFUSED | 服务没监听 | `journalctl -u s-ui` |
-| UDP 端口 TCP 探测 REFUSED | 正常现象 | 只能用真实客户端测 |
+| 正常 | 外部可连 | — |
+| **端口被封锁** | 服务端在听、防火墙也放行，但外部连不上 | 换端口（动配置） |
+| **防火墙未放行** | 服务端在听，但 iptables 缺规则 | 补一条规则，**几秒钟的事** |
+| 服务未监听 | 没有进程在听 | `journalctl -u s-ui` |
+| 需客户端验证 | UDP 端口，TCP 探测无意义 | `bench_nodes.py` 量吞吐 |
+
+只做外部探测（`--no-ssh`）的话，后两者会被混成一个"连不上"，容易白折腾一轮。
 
 **失效端口要记账**：写进 `deploy.env` 的 `DEAD_PORTS`（逗号分隔），
 `rotate_port.py` 自动跳过。被封的端口在服务端看起来完全正常，脚本判断不了，只能人工维护。

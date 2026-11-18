@@ -97,12 +97,46 @@ def apply_firewall(cli, port: int, proto: str, dry_run: bool) -> None:
     print("  iptables: 规则已持久化")
 
 
+def drop_firewall(cli, port: int, proto: str) -> None:
+    """删掉旧端口的放行规则。可能有重复添加的多条，循环删干净。"""
+    removed = 0
+    for _ in range(10):
+        rc, _, _ = run(cli, 'iptables -D INPUT -p %s --dport %d -j ACCEPT' % (proto, port),
+                       timeout=20)
+        if rc != 0:
+            break
+        removed += 1
+    if removed:
+        run(cli, "iptables-save > /etc/iptables/rules.v4", timeout=20)
+        print("  iptables: 已删除旧端口 %s/%d 的 %d 条规则" % (proto, port, removed))
+    else:
+        print("  iptables: 旧端口 %s/%d 无规则可删" % (proto, port))
+
+
+def verify_from_outside(host: str, port: int, proto: str, timeout: float = 8.0):
+    """从本机验证新端口。UDP 测不了，返回 None。"""
+    if proto != "tcp":
+        return None
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        sock.connect((host, port))
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        sock.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="给 S-UI 节点换端口")
     ap.add_argument("--node", help="anytls / hysteria2 / reality / shadowsocks / tuic")
     ap.add_argument("--port", type=int, help="指定端口；不给则自动挑")
     ap.add_argument("--list", action="store_true", help="列出候选端口")
     ap.add_argument("--dry-run", action="store_true", help="只打印，不改动")
+    ap.add_argument("--cleanup-old", action="store_true",
+                    help="换完后删掉旧端口的 iptables 规则（默认保留，方便回退）")
     args = ap.parse_args()
 
     if args.list:
@@ -164,17 +198,35 @@ def main() -> int:
                 print("  核心: 已在 :%d 监听" % new)
             else:
                 print("  ⚠️  核心未在 :%d 监听，看 journalctl -u s-ui -n 30" % new)
+
+            # 从本机验证 —— 服务端在听不等于外部连得上（防火墙、端口封锁都可能拦在外面）
+            host = cfg.get("SERVER_IP") or cfg.get("VPS_HOST")
+            ok = verify_from_outside(host, new, proto) if host else None
+            if ok is True:
+                print("  外部: %s:%d 可连 ✅" % (host, new))
+            elif ok is False:
+                print("  ❌ 外部: %s:%d 连不上 —— 可能新端口也被封，或防火墙没生效" % (host, new))
+                print("     先跑 check_ports.py 看服务端对照，再决定要不要再换一个")
+            else:
+                print("  外部: UDP 端口无法从本机验证，需真实客户端拨号")
+
+            if args.cleanup_old:
+                drop_firewall(cli, old, proto)
     finally:
         cli.close()
 
     print("")
     print("下一步：")
     print("  1. 重新拉订阅（客户端会自动拿到新端口）")
-    print("  2. 本机实测：python scripts/check_ports.py")
+    if proto == "tcp":
+        print("  2. 复核：python scripts/check_ports.py")
+    else:
+        print("  2. UDP 需真实客户端验证：python scripts/bench_nodes.py --sub <Clash订阅> --mihomo <路径>")
     print("  3. 把旧端口记进 deploy.env 的 DEAD_PORTS，避免下次又挑到它：")
     print("     DEAD_PORTS=%s" % ",".join(str(p) for p in sorted(dead_ports(cfg) | {old})))
-    print("  4. 稳定运行几天后可清理旧端口的 iptables 规则：")
-    print("     iptables -D INPUT -p %s --dport %d -j ACCEPT" % (proto, old))
+    if not args.cleanup_old:
+        print("  4. 旧端口的 iptables 规则还在（方便回退）。稳定后可删，或换端口时加 --cleanup-old：")
+        print("     iptables -D INPUT -p %s --dport %d -j ACCEPT" % (proto, old))
     return 0
 
 

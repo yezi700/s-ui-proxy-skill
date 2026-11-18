@@ -392,6 +392,101 @@ class TestPortRotation(unittest.TestCase):
         self.assertEqual(proto["ANYTLS_PORT"], "tcp")
         self.assertEqual(proto["SS_PORT"], "tcp")
 
+    # ------------------------------------------------------ 诊断矩阵
+    # 「端口被封」和「防火墙没放行」从外部看都是 TIMEOUT，但处理方式完全不同：
+    # 前者要换端口（动配置、重拉订阅），后者补一条 iptables 就好。
+    # 这组测试锁住这个区分逻辑。
+
+    def _row(self, proto="tcp", status="TIMEOUT", port=2087):
+        return {"proto": proto, "status": status, "port": port}
+
+    def _srv(self, listen=(), fw=(), allow_all=False, proto="tcp"):
+        return {
+            "tcp_listen": set(listen) if proto == "tcp" else set(),
+            "udp_listen": set(listen) if proto == "udp" else set(),
+            "allowed": set(fw),
+            "allow_all": allow_all,
+        }
+
+    def test_diagnose_blocked(self):
+        """在听 + 放行 + 外部超时 = 端口被封锁。"""
+        v = self.cp.diagnose(self._row(status="TIMEOUT"),
+                             self._srv(listen=[2087], fw=[("tcp", 2087)]))
+        self.assertEqual(v, self.cp.BLOCKED)
+
+    def test_diagnose_no_firewall(self):
+        """在听 + 没放行 + 外部超时 = 防火墙问题，别换端口。"""
+        v = self.cp.diagnose(self._row(status="TIMEOUT"),
+                             self._srv(listen=[2087], fw=[]))
+        self.assertEqual(v, self.cp.NO_FW)
+
+    def test_diagnose_no_listen(self):
+        """服务端根本没在听。"""
+        v = self.cp.diagnose(self._row(status="TIMEOUT"),
+                             self._srv(listen=[], fw=[("tcp", 2087)]))
+        self.assertEqual(v, self.cp.NO_LISTEN)
+
+    def test_diagnose_ok(self):
+        v = self.cp.diagnose(self._row(status="OPEN"),
+                             self._srv(listen=[2087], fw=[("tcp", 2087)]))
+        self.assertEqual(v, self.cp.OK)
+
+    def test_diagnose_udp_needs_client(self):
+        """UDP 在听且放行时，只能说「需客户端验证」，不能断言正常。"""
+        v = self.cp.diagnose(self._row(proto="udp", status="—", port=2083),
+                             self._srv(listen=[2083], fw=[("udp", 2083)], proto="udp"))
+        self.assertEqual(v, self.cp.UDP_ONLY)
+
+    def test_diagnose_udp_no_firewall(self):
+        v = self.cp.diagnose(self._row(proto="udp", status="—", port=2083),
+                             self._srv(listen=[2083], fw=[], proto="udp"))
+        self.assertEqual(v, self.cp.NO_FW)
+
+    def test_diagnose_without_server_falls_back(self):
+        """拿不到服务端状态时，只能区分通/不通。"""
+        self.assertEqual(self.cp.diagnose(self._row(status="OPEN"), None), self.cp.OK)
+        self.assertEqual(self.cp.diagnose(self._row(status="TIMEOUT"), None), self.cp.BLOCKED)
+
+    # ------------------------------------------------------ 规则解析
+
+    def test_parse_firewall_ignores_conditional(self):
+        """带 -i / --ctstate 的规则不是无条件的，不该误报 ACCEPT all。"""
+        text = "\n".join([
+            "-A INPUT -i lo -j ACCEPT",
+            "-A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+            "-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT",
+            "-A INPUT -m conntrack --ctstate INVALID -j DROP",
+        ])
+        allowed, allow_all = self.cp.parse_firewall(text)
+        self.assertFalse(allow_all, "有条件的规则被误判成 ACCEPT all")
+        self.assertIn(("tcp", 22), allowed)
+
+    def test_parse_firewall_detects_bare_accept(self):
+        """光板 `-A INPUT -j ACCEPT` 会架空 policy DROP，必须识别出来。"""
+        text = "\n".join([
+            "-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT",
+            "-A INPUT -j ACCEPT",
+        ])
+        _, allow_all = self.cp.parse_firewall(text)
+        self.assertTrue(allow_all)
+
+    def test_parse_firewall_collects_both_protos(self):
+        text = "\n".join([
+            "-A INPUT -p tcp -m tcp --dport 8443 -j ACCEPT",
+            "-A INPUT -p udp -m udp --dport 2083 -j ACCEPT",
+        ])
+        allowed, _ = self.cp.parse_firewall(text)
+        self.assertIn(("tcp", 8443), allowed)
+        self.assertIn(("udp", 2083), allowed)
+
+    def test_parse_listen(self):
+        text = "\n".join([
+            "LISTEN 0 4096 *:8443 *:*",
+            "LISTEN 0 4096 [::]:2053 [::]:*",
+            "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*",
+        ])
+        self.assertEqual(self.cp.parse_listen(text), {8443, 2053, 22})
+
 
 # ---------------------------------------------------------------- 文档一致性
 
