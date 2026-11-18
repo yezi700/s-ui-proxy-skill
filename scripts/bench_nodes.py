@@ -189,8 +189,21 @@ def main() -> int:
                      "/".join(str(x) for x in lat)))
 
         if args.out:
+            # ⚠️ 落盘格式必须和 render_report.load_measured 对得上：
+            #    latency_ms / throughput_mbps_sustained_100mb 都是「tag → 列表」的字典。
+            #    之前这里直接 dump 了按节点嵌套的 res，render_report 读不到任何一行，
+            #    报告里整节「实测记录」被静默省略（踩过一次）。
+            import datetime
+            out = {
+                "measured_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M (UTC+8)"),
+                "client": "mihomo（GLOBAL 组经 RESTful API 逐个切换）",
+                "latency_ms": {n: r["latency_ms"] for n, r in res.items()},
+                "throughput_mbps_sustained_100mb": {
+                    n: [r["mbps"]] for n, r in res.items() if r["mbps"]
+                },
+            }
             with open(args.out, "w", encoding="utf-8") as fh:
-                json.dump(res, fh, ensure_ascii=False, indent=2)
+                json.dump(out, fh, ensure_ascii=False, indent=2)
             print("\n已写入 %s" % args.out)
         return 0
     finally:

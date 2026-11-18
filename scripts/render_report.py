@@ -416,10 +416,15 @@ def render_md(d: dict) -> str:
     A("s-ui                           # 交互菜单")
     A("```")
     A("")
-    A("备份数据库：")
+    A("备份数据库（cron 每天 04:17 自动跑，保留 7 天）：")
     A("")
     A("```bash")
-    A("cp /usr/local/s-ui/db/s-ui.db /root/s-ui.db.bak.$(date +%Y%m%d-%H%M)")
+    A("/usr/local/bin/sui-backup.sh          # 立刻备份一次（sqlite3 .backup，WAL 下不能直接 cp）")
+    A("ls -lh /root/backups/s-ui/            # 已有备份")
+    A("# 恢复：停面板 → 覆盖 → 启动")
+    A("systemctl stop s-ui")
+    A("cp /root/backups/s-ui/s-ui-YYYYMMDD.db /usr/local/s-ui/db/s-ui.db")
+    A("systemctl start s-ui")
     A("```")
     A("")
     A(S("注意事项"))
@@ -657,7 +662,8 @@ def render_html(d: dict) -> str:
                  'systemctl restart s-ui         # 改端口/路径/证书后必须执行\n'
                  'journalctl -u s-ui -f          # 实时日志\n'
                  's-ui                           # 交互菜单\n'
-                 'cp /usr/local/s-ui/db/s-ui.db /root/s-ui.db.bak.$(date +%Y%m%d-%H%M)'
+                 '/usr/local/bin/sui-backup.sh   # 立刻备份 DB（cron 每天 04:17 自动跑，保留 7 天）\n'
+                 'ls -lh /root/backups/s-ui/     # 已有备份；恢复=停面板→覆盖 s-ui.db→启动'
                  '</code></pre></div>')
 
     notes = ['不要删 <code>/root/cert/</code>，面板、订阅与所有带 TLS 的节点共用同一张证书。',
