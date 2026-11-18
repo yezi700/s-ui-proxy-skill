@@ -613,6 +613,34 @@ class TestScripts(unittest.TestCase):
         self.assertIn("不经过 INPUT 链", text)
         self.assertIn("没有验证防火墙", text)
 
+    def test_all_config_keys_declared(self):
+        """Python 脚本读的配置键必须在 load_env 白名单里。
+
+        不在白名单的键，deploy.env 能读到（load_env 会读所有行），
+        但用环境变量覆盖时会静默失效 —— 这类问题很难在部署时发现。
+        只扫 .py：shell 里的 ${VAR} 大多是脚本局部变量，扫进来全是误报。
+        """
+        import inspect
+
+        src = inspect.getsource(ssh_run.load_env)
+        declared = set(re.findall(r'"([A-Z][A-Z0-9_]{2,})"', src))
+
+        missing = {}
+        scripts_dir = os.path.join(ROOT, "scripts")
+        for fn in sorted(os.listdir(scripts_dir)):
+            if not fn.endswith(".py"):
+                continue
+            with open(os.path.join(scripts_dir, fn), encoding="utf-8") as fh:
+                text = fh.read()
+            keys = set(re.findall(r'cfg\.get\("([A-Z][A-Z0-9_]+)"', text))
+            keys |= set(re.findall(r'cfg\["([A-Z][A-Z0-9_]+)"\]', text))
+            bad = keys - declared
+            if bad:
+                missing[fn] = sorted(bad)
+
+        self.assertEqual(missing, {},
+                         "这些键没进 load_env 白名单，环境变量覆盖会失效：%s" % missing)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

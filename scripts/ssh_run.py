@@ -81,6 +81,7 @@ def load_env() -> dict:
         "SUB_PORT", "SUB_PATH", "SUB_ID",
         # 节点端口
         "ANYTLS_PORT", "TUIC_PORT", "HY2_PORT", "REALITY_PORT", "HY2_HOP_RANGE",
+        "SS_PORT", "SS_METHOD", "SS_PASSWORD", "DEAD_PORTS",
         "SS_PORT", "SS_METHOD", "ACME_PORT", "SSH_PORT",
         # Reality 参数
         "REALITY_SNI", "REALITY_PRIV", "REALITY_PUB", "REALITY_SID", "REALITY_UUID",
