@@ -287,6 +287,31 @@ else
 fi
 rm -f /tmp/sui.ck /tmp/sui2.ck
 
+# ---------------------------------------------------------------- 自动备份
+echo ""
+echo "########## 8.5 面板数据库每日自动备份 ##########"
+# s-ui.db 里有全部入站、客户端凭据、流量统计。丢了要整个重配。
+# 用 sqlite3 的 .backup 而不是 cp —— DB 是 WAL 模式，直接复制可能拿到不一致的快照。
+command -v sqlite3 >/dev/null 2>&1 || apt-get install -y -qq sqlite3 >/dev/null 2>&1 || true
+mkdir -p /root/backups/s-ui
+cat > /usr/local/bin/sui-backup.sh <<'BACKUP'
+#!/bin/bash
+set -uo pipefail
+DB=/usr/local/s-ui/db/s-ui.db
+BK=/root/backups/s-ui
+mkdir -p "$BK"
+[ -f "$DB" ] || exit 1
+sqlite3 "$DB" ".backup '$BK/s-ui-$(date +%Y%m%d).db'" 2>/dev/null
+find "$BK" -name "s-ui-*.db" -mtime +7 -delete 2>/dev/null
+BACKUP
+chmod +x /usr/local/bin/sui-backup.sh
+/usr/local/bin/sui-backup.sh 2>/dev/null || true
+( crontab -l 2>/dev/null | grep -v "sui-backup"; echo "17 4 * * * /usr/local/bin/sui-backup.sh" ) | crontab -
+echo "--- 备份目录 ---"
+ls -lh /root/backups/s-ui/ 2>/dev/null | tail -3
+echo "--- cron ---"
+crontab -l 2>/dev/null | grep sui-backup || echo "⚠️ cron 未写入"
+
 # ---------------------------------------------------------------- 落盘
 echo ""
 echo "########## 9. 写入安装结果 ##########"

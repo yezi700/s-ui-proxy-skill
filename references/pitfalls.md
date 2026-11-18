@@ -11,6 +11,9 @@
 |---|---|---|
 | 节点能连、能开网页，但吞吐只有几百 KB/s | 明文 QUIC 被限速 | §6.8 |
 | 某个端口昨天还好，今天全超时（服务端仍在监听） | 端口被逐步封锁 | §1.5 |
+| 磁盘莫名满了，服务都正常 | journal 无上限 | §5.6 |
+| 扫描器能看到所有端口，包括没在用的 | 遗留的无条件 ACCEPT all | §5.2 |
+| 面板配置全丢 / 要重建订阅用户 | DB 没备份 | §5.7 |
 | Reality 报 `REALITY authentication failed` | 443 被针对性干扰 | §1.1 |
 | Hysteria2 全部 `context deadline exceeded` | 同上 | §1.1 |
 | 「我改了端口，怎么没生效」 | 只改了 out_json，没改 options | §3.13 |
@@ -558,17 +561,63 @@ Debian 12+ 上 `ufw` 的包声明了 `Breaks: iptables-persistent`，
 
 ### 5.2 `ACCEPT all` 会让 `policy DROP` 失效
 
-如果 INPUT 链第一条是无条件 `ACCEPT all`（常见于旧面板遗留规则），
-后面的 `policy DROP` 等于没写，**所有端口都在对外开放**。
+如果 INPUT 链里有一条**无条件的** `ACCEPT all`（常见于旧面板遗留规则），
+它后面所有规则包括 `policy DROP` 全部等于没写，**所有端口都在对外开放**。
+扫描器能直接看到 22 / 面板端口 / 所有你试过的端口。
 
 排查：
 
 ```bash
-iptables -L INPUT -n --line-numbers | head -5
+iptables -L INPUT -n --line-numbers
 ```
 
-看到第一条是 `ACCEPT all -- 0.0.0.0/0 0.0.0.0/0` 且没有 `-i` / `-p` 限定时，
-说明规则已经失效，应该重建。
+看到 `ACCEPT all -- 0.0.0.0/0 0.0.0.0/0` 且**没有 `-i` / `-p` 限定**的，就是它。
+注意 `-A INPUT -i lo -j ACCEPT` 和带 `ctstate RELATED,ESTABLISHED` 的都不是问题。
+
+#### 先找出哪些规则是死的
+
+换过端口的旧值不会自动消失。对照"规则里放行的端口"和"实际在监听的端口"：
+
+```bash
+iptables -L INPUT -n --line-numbers
+ss -tlnp | grep -oE ':[0-9]+ ' | sort -u    # TCP 在听
+ss -ulnp | grep -oE ':[0-9]+ ' | sort -u    # UDP 在听
+```
+
+规则里有、`ss` 里没有的 = 死规则，可以直接删。实测一台跑了三个月的机器，
+17 条规则里有 4 条是死端口（换走的 2053、早期试过的 443、Hy2 的 tcp 规则）。
+
+#### 安全删除流程（带自动回滚）
+
+**顺序不能反**：先架回滚，再删规则。反过来一旦锁死自己就只能开工单。
+
+```bash
+# 1. 备份当前规则
+iptables-save > /root/iptables.good.v4
+
+# 2. 架 5 分钟自动回滚（用 systemd-run，SSH 断了也能执行）
+systemd-run --on-active=5min --unit=iptables-rollback \
+  /usr/sbin/iptables-restore /root/iptables.good.v4
+
+# 3. 删死规则（从大编号往小删，否则编号会错位）
+#    确认编号后再删：iptables -L INPUT -n --line-numbers
+iptables -D INPUT 12
+iptables -D INPUT 11
+...
+
+# 4. 从外部验证（必须从本机测，VPS 自测走 lo 无意义 —— 见 §5.3）
+python scripts/check_ports.py
+
+# 5. 全部可达才取消回滚并持久化
+systemctl stop iptables-rollback.timer
+iptables-save > /etc/iptables/rules.v4
+```
+
+**白名单要覆盖全**：SSH 端口、ACME 的 80、面板、订阅、每个节点的 TCP/UDP。
+漏一个就是"某个节点突然连不上"。`check_ports.py` 的探测结果就是验收标准。
+
+`setup_base.sh` 会整份重写 `rules.v4`，所以**从旧面板迁移时重跑它就能清掉遗留规则** ——
+前提是 `deploy.env` 里的端口参数是对的。
 
 ### 5.3 VPS 自测验证不了防火墙
 
@@ -591,6 +640,69 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 先换 DNS 再关 IPv6。顺序反了会导致域名解析卡住（IPv6 nameserver 不可达）。
 脚本里的做法：备份 `resolv.conf` → 写纯 IPv4 DNS → 写 sysctl 关 IPv6 → 自检 →
 失败自动回滚。
+
+### 5.6 journal 会无声地吃满磁盘
+
+**现象**：一切正常，某天 `df` 才发现磁盘快满。
+
+**根因**：sing-box 的 `log.level = info` 会**为每个连接记一行**
+（`inbound/anytls[xxx] [us] inbound connection to ...`），
+代理跑得越勤日志越多。实测一台跑了 4 天的机器：
+
+```
+journalctl --disk-usage  →  499M
+df -h /                  →  30G 盘已用 16%
+```
+
+默认 `journald` **没有大小上限**（只按时间轮转），所以会一直涨。
+
+**修复**（`setup_base.sh` 已内置）：
+
+```ini
+# /etc/systemd/journald.conf.d/99-size-limit.conf
+[Journal]
+SystemMaxUse=150M
+SystemMaxFileSize=30M
+RuntimeMaxUse=50M
+```
+
+```bash
+systemctl restart systemd-journald
+journalctl --vacuum-size=150M
+```
+
+实测清理后从 499M 降到 138M，磁盘占用从 4.3G 回到 3.9G。
+
+**不要直接降到 `warn`**：info 日志是排查"某节点连不上"的主要依据
+（能看到源 IP、目标域名、哪个客户端在用），关掉等于自断诊断能力。
+用大小上限而不是关日志。
+
+### 5.7 面板数据库没有任何备份
+
+`s-ui.db` 里有**全部入站、客户端凭据、流量统计**。丢了要整个重配 ——
+`deploy.env` 只能重建节点参数，订阅用户的流量记录全没。
+
+而且它默认**不会被任何东西备份**：`acme.sh` 的 cron 只续证书，
+systemd 不管数据，重启不会丢但误删/损坏就没了。
+
+**修复**（`install_sui.sh` 已内置）：
+
+```bash
+# 用 .backup 而不是 cp —— DB 是 WAL 模式，直接复制可能拿到不一致的快照
+sqlite3 /usr/local/s-ui/db/s-ui.db ".backup '/root/backups/s-ui/s-ui-$(date +%Y%m%d).db'"
+find /root/backups/s-ui -name "s-ui-*.db" -mtime +7 -delete
+```
+
+配 `crontab`：`17 4 * * * /usr/local/bin/sui-backup.sh`（每天 04:17，保留 7 天）。
+
+恢复：停服务 → 把备份覆盖回 `db/s-ui.db` → 删掉 `-wal` / `-shm` → 启动。
+
+```bash
+systemctl stop s-ui
+cp /root/backups/s-ui/s-ui-20261118.db /usr/local/s-ui/db/s-ui.db
+rm -f /usr/local/s-ui/db/s-ui.db-wal /usr/local/s-ui/db/s-ui.db-shm
+systemctl start s-ui
+```
 
 ---
 

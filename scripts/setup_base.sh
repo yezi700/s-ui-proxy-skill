@@ -256,6 +256,26 @@ sysctl net.core.default_qdisc
 echo "--- 可用算法 ---"
 sysctl net.ipv4.tcp_available_congestion_control
 
+# ---------------------------------------------------------------- 7.5 日志上限
+echo ""
+echo "########## 7.5 限制 journal 大小 ##########"
+# sing-box 的 info 日志会为每个连接记一行，长期跑下来很吃盘。
+# 实测一台跑了 4 天的机器 journal 已涨到 499M（30G 盘占 16%）。
+# 不设上限的话迟早撑满磁盘，而且这类问题不会立刻报错，只在 df 时才被发现。
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/99-size-limit.conf <<'EOF'
+[Journal]
+# 留 150M 足够排查近几天的问题；单文件 30M 便于轮转
+SystemMaxUse=150M
+SystemMaxFileSize=30M
+RuntimeMaxUse=50M
+EOF
+systemctl restart systemd-journald 2>/dev/null || true
+sleep 1
+journalctl --vacuum-size=150M >/dev/null 2>&1 || true
+echo "--- 当前 journal 占用 ---"
+journalctl --disk-usage 2>/dev/null || true
+
 # ---------------------------------------------------------------- 8. 校验
 echo ""
 echo "########## 8. 网卡与监听 ##########"

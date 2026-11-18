@@ -248,7 +248,7 @@ python scripts/rotate_port.py --node <节点>
 
 只写一半的话，用 Xray 内核的人会以为节点全挂了。详见 `references/pitfalls.md` §6。
 
-### Step 8 · 端口维护（长期）
+### Step 8 · 端口维护
 
 **端口不是配好就永久有效。** 实测同一台机器间隔 11 天：
 
@@ -278,6 +278,37 @@ python scripts/rotate_port.py --list          # 看候选池
 
 **失效端口要记账**：写进 `deploy.env` 的 `DEAD_PORTS`（逗号分隔），
 `rotate_port.py` 自动跳过。被封的端口在服务端看起来完全正常，脚本判断不了，只能人工维护。
+
+### Step 9 · 定期运维检查（长期）
+
+部署完不是结束。这三件事**不会报错，只会在某天突然变成事故**：
+
+```bash
+# 1. 端口还活着吗
+python scripts/check_ports.py
+
+# 2. 磁盘会被 journal 吃满吗（sing-box 每个连接记一行日志）
+journalctl --disk-usage
+df -h /
+
+# 3. 面板 DB 有备份吗
+ls -lh /root/backups/s-ui/ | tail -3
+crontab -l | grep sui-backup
+```
+
+`setup_base.sh` 已内置 journal 上限（150M），`install_sui.sh` 已内置每日 DB 备份
+（04:17，保留 7 天）。但如果是从旧面板迁移过来的机器，这两项**不会自动补上**，
+需要手工确认一次。
+
+**防火墙审计**（迁移场景必做）：
+
+```bash
+iptables -L INPUT -n --line-numbers | head -8
+```
+
+如果有**无条件的** `ACCEPT all`（不带 `-i` / `-p`），说明 `policy DROP` 已失效，
+所有端口对外裸奔。安全的改法见 `references/pitfalls.md` §5.2 ——
+核心是**先架 5 分钟自动回滚，再删规则，最后从外部验证**。
 
 ## 关键约束
 
@@ -312,7 +343,9 @@ python scripts/rotate_port.py --list          # 看候选池
 17. **测吞吐必须跑满大文件**：6 秒窗口量到的是 TCP 慢启动，会把带宽低估 3~4 倍
    （20~26 Mbps vs 实际的 53~108 Mbps）。而且吞吐波动大于节点之间的差异，
    **选节点只看延迟，别看吞吐**（§1.6）。
-18. 涉及删除、覆盖、改端口等破坏性操作前，先向用户说明并取得确认。
+18. **journal 和 DB 备份不是可选项**。sing-box 每个连接记一行日志，无上限会吃满磁盘；
+    `s-ui.db` 丢了要整个重配。新装的机器脚本会带上，迁移过来的机器要手工确认。
+19. 涉及删除、覆盖、改端口等破坏性操作前，先向用户说明并取得确认。
 
 ## 排查入口
 
